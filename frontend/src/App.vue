@@ -218,7 +218,7 @@ onMounted(fetchBootstrap)
     <section class="hero-panel">
       <div class="hero-copy">
         <div class="eyebrow">Hosted Community Edition</div>
-        <h1>Community Edition</h1>
+        <h1>FX Scalper Community Edition</h1>
         <p>
           A browser-based companion experience with paper trading, simplified rules,
           transparent rebalancing, and built-in scenario backtests.
