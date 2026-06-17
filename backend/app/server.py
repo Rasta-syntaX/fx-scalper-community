@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -11,10 +12,55 @@ from uuid import uuid4
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+from app.deriv_service import (
+    DEFAULT_REST_URL,
+    DEFAULT_WS_URL,
+    DerivCommunityClient,
+    DerivServiceError,
+)
+
 app = Flask(__name__)
 CORS(app)
 
-DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
+
+DEFAULT_DERIV_API_URL = DEFAULT_REST_URL
+DEFAULT_DERIV_WS_URL = DEFAULT_WS_URL
+SUPPORTED_ASSET_CLASSES = (
+    "FOREX",
+    "COMMODITIES",
+    "CRYPTO",
+    "SYNTHETICS",
+    "INDICES",
+    "STOCKS",
+    "CUSTOM",
+)
+
+
+def resolve_data_dir() -> Path:
+    candidates: list[Path] = []
+    env_dir = os.getenv("COMMUNITY_DATA_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    candidates.extend([DEFAULT_DATA_DIR, Path.home() / ".fx-scalper-community"])
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write_test"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return candidate
+        except Exception:
+            continue
+    return DEFAULT_DATA_DIR
+
+
+DATA_DIR = resolve_data_dir()
 STORE_PATH = DATA_DIR / "store.json"
 
 DEFAULT_TARGET_ALLOCATIONS = {
@@ -73,131 +119,34 @@ RULES = [
     },
 ]
 
-SYMBOLS = [
-    {"symbol": "frxEURUSD", "label": "EUR/USD", "asset_class": "FOREX"},
-    {"symbol": "frxGBPUSD", "label": "GBP/USD", "asset_class": "FOREX"},
-    {"symbol": "frxXAUUSD", "label": "Gold/USD", "asset_class": "COMMODITIES"},
-    {"symbol": "cryBTCUSD", "label": "BTC/USD", "asset_class": "CRYPTO"},
-    {"symbol": "stpRNG10", "label": "Step Index 10", "asset_class": "SYNTHETICS"},
-]
-
-SYMBOL_MAP = {row["symbol"]: row for row in SYMBOLS}
-BASE_MARKET_MAP = {}
-
-BASE_MARKET = [
-    {
-        "symbol": "frxEURUSD",
-        "asset_class": "FOREX",
-        "price": 1.0871,
-        "ema_fast": 1.0865,
-        "ema_slow": 1.0856,
-        "adx": 26.0,
-        "rsi": 56.0,
-        "atr_ratio": 1.08,
-        "price_vs_vwap": "above",
-        "candle_quality": "clean",
-        "distance_to_band": 0.62,
-    },
-    {
-        "symbol": "frxGBPUSD",
-        "asset_class": "FOREX",
-        "price": 1.2733,
-        "ema_fast": 1.2721,
-        "ema_slow": 1.2727,
-        "adx": 23.0,
-        "rsi": 47.0,
-        "atr_ratio": 0.98,
-        "price_vs_vwap": "below",
-        "candle_quality": "clean",
-        "distance_to_band": 0.44,
-    },
-    {
-        "symbol": "frxXAUUSD",
-        "asset_class": "COMMODITIES",
-        "price": 2328.4,
-        "ema_fast": 2327.1,
-        "ema_slow": 2325.5,
-        "adx": 19.0,
-        "rsi": 69.0,
-        "atr_ratio": 1.02,
-        "price_vs_vwap": "above",
-        "candle_quality": "stretched",
-        "distance_to_band": 0.91,
-    },
-    {
-        "symbol": "cryBTCUSD",
-        "asset_class": "CRYPTO",
-        "price": 67220.0,
-        "ema_fast": 67080.0,
-        "ema_slow": 66990.0,
-        "adx": 28.0,
-        "rsi": 61.0,
-        "atr_ratio": 1.10,
-        "price_vs_vwap": "above",
-        "candle_quality": "clean",
-        "distance_to_band": 0.58,
-    },
-    {
-        "symbol": "stpRNG10",
-        "asset_class": "SYNTHETICS",
-        "price": 239.7,
-        "ema_fast": 239.4,
-        "ema_slow": 240.2,
-        "adx": 21.0,
-        "rsi": 43.0,
-        "atr_ratio": 0.92,
-        "price_vs_vwap": "below",
-        "candle_quality": "clean",
-        "distance_to_band": 0.37,
-    },
-]
-
-BASE_MARKET_MAP = {row["symbol"]: row for row in BASE_MARKET}
-
 DEFAULT_STATE = {
     "settings": {
         "paper_trading_enabled": True,
+        "live_trading_enabled": False,
+        "broker_provider": "deriv",
+        "deriv_app_id": "",
+        "deriv_token": "",
+        "deriv_api_url": DEFAULT_DERIV_API_URL,
+        "deriv_ws_url": DEFAULT_DERIV_WS_URL,
+        "deriv_options_account_mode": "demo",
+        "deriv_options_account_id": "",
         "risk_profile": "balanced",
         "max_open_positions": 6,
+        "live_trade_stake": 1.0,
+        "live_trade_currency": "USD",
+        "live_trade_duration": 5,
+        "live_trade_duration_unit": "t",
         "rebalance_enabled": True,
         "rebalance_key_mode": "asset_class",
         "rebalance_tolerance": 0.08,
         "target_allocations": dict(DEFAULT_TARGET_ALLOCATIONS),
+        "symbols": [],
+        "market_snapshots": [],
     },
-    "portfolio": [
-        {
-            "id": "pos-1",
-            "symbol": "frxEURUSD",
-            "asset_class": "FOREX",
-            "side": "BUY",
-            "exposure": 1200.0,
-            "entry_price": 1.0842,
-            "current_price": 1.0871,
-            "opened_at": "2026-06-15T08:00:00Z",
-        },
-        {
-            "id": "pos-2",
-            "symbol": "cryBTCUSD",
-            "asset_class": "CRYPTO",
-            "side": "BUY",
-            "exposure": 650.0,
-            "entry_price": 66850.0,
-            "current_price": 67220.0,
-            "opened_at": "2026-06-15T08:20:00Z",
-        },
-        {
-            "id": "pos-3",
-            "symbol": "stpRNG10",
-            "asset_class": "SYNTHETICS",
-            "side": "SELL",
-            "exposure": 900.0,
-            "entry_price": 241.4,
-            "current_price": 239.7,
-            "opened_at": "2026-06-15T08:35:00Z",
-        },
-    ],
+    "portfolio": [],
     "trade_history": [],
     "last_backtest": None,
+    "last_broker_status": None,
 }
 
 
@@ -264,12 +213,93 @@ def normalize_target_allocations(targets: object, key_mode: str = "asset_class")
     return {key: value / total for key, value in cleaned.items()}
 
 
-def sanitize_position(raw_position: object) -> Optional[dict]:
+def normalize_asset_class(value: object) -> str:
+    asset_class = str(value or "CUSTOM").strip().upper()
+    return asset_class if asset_class in SUPPORTED_ASSET_CLASSES else "CUSTOM"
+
+
+def normalize_symbols(symbols: object) -> list[dict]:
+    if not isinstance(symbols, list):
+        return []
+    cleaned: list[dict] = []
+    seen: set[str] = set()
+    for item in symbols:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        cleaned.append(
+            {
+                "symbol": symbol,
+                "label": str(item.get("label") or symbol).strip() or symbol,
+                "asset_class": normalize_asset_class(item.get("asset_class")),
+            }
+        )
+    return cleaned
+
+
+def symbol_map_from_settings(settings: dict) -> dict[str, dict]:
+    return {item["symbol"]: item for item in normalize_symbols(settings.get("symbols", []))}
+
+
+def normalize_market_snapshots(snapshots: object, symbol_map: dict[str, dict]) -> list[dict]:
+    if not isinstance(snapshots, list):
+        return []
+    cleaned: list[dict] = []
+    for item in snapshots:
+        if not isinstance(item, dict):
+            continue
+        symbol = str(item.get("symbol") or "").strip()
+        meta = symbol_map.get(symbol)
+        if not meta:
+            continue
+        try:
+            price = float(item.get("price") or 0.0)
+        except Exception:
+            continue
+        if price <= 0:
+            continue
+        cleaned.append(
+            {
+                "symbol": symbol,
+                "asset_class": meta["asset_class"],
+                "price": round(price, 5),
+                "ema_fast": float(item.get("ema_fast") or price),
+                "ema_slow": float(item.get("ema_slow") or price),
+                "adx": float(item.get("adx") or 0.0),
+                "rsi": float(item.get("rsi") or 50.0),
+                "atr_ratio": float(item.get("atr_ratio") or 1.0),
+                "price_vs_vwap": "below" if str(item.get("price_vs_vwap") or "above").strip().lower() == "below" else "above",
+                "candle_quality": "stretched" if str(item.get("candle_quality") or "clean").strip().lower() == "stretched" else "clean",
+                "distance_to_band": float(item.get("distance_to_band") or 0.0),
+            }
+        )
+    return cleaned
+
+
+def runtime_setting_overrides() -> dict:
+    overrides: dict[str, object] = {}
+    mapping = {
+        "COMMUNITY_DERIV_APP_ID": "deriv_app_id",
+        "COMMUNITY_DERIV_TOKEN": "deriv_token",
+        "COMMUNITY_DERIV_API_URL": "deriv_api_url",
+        "COMMUNITY_DERIV_WS_URL": "deriv_ws_url",
+    }
+    for env_key, setting_key in mapping.items():
+        value = os.getenv(env_key)
+        if value:
+            overrides[setting_key] = value
+    return overrides
+
+
+def sanitize_position(raw_position: object, symbol_map: dict[str, dict]) -> Optional[dict]:
     if not isinstance(raw_position, dict):
         return None
     symbol = str(raw_position.get("symbol") or "").strip()
     side = str(raw_position.get("side") or "").strip().upper()
-    if symbol not in SYMBOL_MAP or side not in {"BUY", "SELL"}:
+    if symbol not in symbol_map or side not in {"BUY", "SELL"}:
         return None
     try:
         exposure = float(raw_position.get("exposure") or 0.0)
@@ -279,7 +309,7 @@ def sanitize_position(raw_position: object) -> Optional[dict]:
         return None
     if exposure <= 0 or entry_price <= 0 or current_price <= 0:
         return None
-    asset_class = SYMBOL_MAP[symbol]["asset_class"]
+    asset_class = symbol_map[symbol]["asset_class"]
     return {
         "id": str(raw_position.get("id") or f"pos-{uuid4().hex[:8]}"),
         "symbol": symbol,
@@ -292,7 +322,7 @@ def sanitize_position(raw_position: object) -> Optional[dict]:
     }
 
 
-def sanitize_trade_history(rows: object) -> list[dict]:
+def sanitize_trade_history(rows: object, symbol_map: dict[str, dict]) -> list[dict]:
     if not isinstance(rows, list):
         return []
     cleaned: list[dict] = []
@@ -300,7 +330,7 @@ def sanitize_trade_history(rows: object) -> list[dict]:
         if not isinstance(row, dict):
             continue
         symbol = str(row.get("symbol") or "").strip()
-        if symbol and symbol not in SYMBOL_MAP:
+        if symbol and symbol not in symbol_map:
             continue
         try:
             exposure = round(float(row.get("exposure") or 0.0), 2)
@@ -322,12 +352,14 @@ def sanitize_trade_history(rows: object) -> list[dict]:
 def sanitize_state(state: object) -> dict:
     raw = state if isinstance(state, dict) else {}
     settings = normalize_settings(raw.get("settings") or {}, deepcopy(DEFAULT_STATE["settings"]))
-    portfolio = [pos for pos in (sanitize_position(item) for item in raw.get("portfolio", [])) if pos]
+    symbol_map = symbol_map_from_settings(settings)
+    portfolio = [pos for pos in (sanitize_position(item, symbol_map) for item in raw.get("portfolio", [])) if pos]
     clean_state = deepcopy(DEFAULT_STATE)
     clean_state["settings"] = settings
     clean_state["portfolio"] = portfolio
-    clean_state["trade_history"] = sanitize_trade_history(raw.get("trade_history", []))
+    clean_state["trade_history"] = sanitize_trade_history(raw.get("trade_history", []), symbol_map)
     clean_state["last_backtest"] = raw.get("last_backtest")
+    clean_state["last_broker_status"] = raw.get("last_broker_status")
     return clean_state
 
 
@@ -340,6 +372,54 @@ def json_payload() -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def sanitize_live_amount(value: object, default: float = 1.0) -> float:
+    try:
+        amount = float(value)
+    except Exception:
+        amount = default
+    return round(max(0.35, min(amount, 100000.0)), 2)
+
+
+def sanitize_duration(value: object, default: int = 5) -> int:
+    try:
+        duration = int(value)
+    except Exception:
+        duration = default
+    return max(1, min(duration, 365))
+
+
+def sanitize_duration_unit(value: object, default: str = "t") -> str:
+    unit = str(value or default).strip().lower()
+    return unit if unit in {"t", "s", "m", "h", "d"} else default
+
+
+def sanitize_trade_side(value: object, default: str = "BUY") -> str:
+    side = str(value or default).strip().upper()
+    return side if side in {"BUY", "SELL"} else default
+
+
+def sanitize_live_contract_type(value: object, side: str = "BUY") -> str:
+    contract_type = str(value or "").strip().upper()
+    if contract_type in {"CALL", "PUT"}:
+        return contract_type
+    return "PUT" if sanitize_trade_side(side) == "SELL" else "CALL"
+
+
+def sanitize_currency(value: object, default: str = "USD") -> str:
+    currency = str(value or default).strip().upper()
+    return currency[:10] or default
+
+
+def payload_value(payload: dict, key: str, current: dict, merged: dict, default: object = "") -> object:
+    if key in payload:
+        return payload.get(key)
+    if key in merged:
+        return merged.get(key)
+    if key in current:
+        return current.get(key)
+    return default
+
+
 def signal_thresholds(risk_profile: str) -> dict[str, float]:
     profile = str(risk_profile or "balanced").strip().lower()
     if profile == "aggressive":
@@ -347,6 +427,31 @@ def signal_thresholds(risk_profile: str) -> dict[str, float]:
     if profile == "conservative":
         return {"adx": 24.0, "rsi_buy_min": 48.0, "rsi_buy_max": 62.0, "rsi_sell_min": 38.0, "rsi_sell_max": 52.0}
     return {"adx": 20.0, "rsi_buy_min": 45.0, "rsi_buy_max": 68.0, "rsi_sell_min": 32.0, "rsi_sell_max": 55.0}
+
+
+def configured_market_snapshots(settings: dict) -> list[dict]:
+    symbol_map = symbol_map_from_settings(settings)
+    return normalize_market_snapshots(settings.get("market_snapshots", []), symbol_map)
+
+
+def deriv_client_from_settings(settings: dict) -> DerivCommunityClient:
+    return DerivCommunityClient(
+        app_id=str(settings.get("deriv_app_id") or "").strip(),
+        token=str(settings.get("deriv_token") or "").strip(),
+        rest_url=str(settings.get("deriv_api_url") or DEFAULT_DERIV_API_URL).strip() or DEFAULT_DERIV_API_URL,
+        ws_url=str(settings.get("deriv_ws_url") or DEFAULT_DERIV_WS_URL).strip() or DEFAULT_DERIV_WS_URL,
+        options_account_mode=str(settings.get("deriv_options_account_mode") or "demo").strip().lower() or "demo",
+        options_account_id=str(settings.get("deriv_options_account_id") or "").strip(),
+    )
+
+
+def record_broker_status(state: dict, status: dict) -> dict:
+    stored = {
+        "checked_at": utc_now_iso(),
+        **(status or {}),
+    }
+    state["last_broker_status"] = stored
+    return stored
 
 
 def classify_regime(snapshot: dict, thresholds: dict[str, float]) -> str:
@@ -382,14 +487,15 @@ def evaluate_snapshot(snapshot: dict, settings: dict) -> dict:
 
 
 def market_view(settings: dict) -> list[dict]:
-    return [evaluate_snapshot(dict(row), settings) for row in BASE_MARKET]
+    return [evaluate_snapshot(dict(row), settings) for row in configured_market_snapshots(settings)]
 
 
-def refresh_portfolio_prices(positions: list[dict]) -> list[dict]:
+def refresh_portfolio_prices(positions: list[dict], settings: dict) -> list[dict]:
+    market_map = {row["symbol"]: row for row in configured_market_snapshots(settings)}
     refreshed: list[dict] = []
     for position in positions:
         updated = dict(position)
-        latest_market = BASE_MARKET_MAP.get(updated["symbol"])
+        latest_market = market_map.get(updated["symbol"])
         if latest_market:
             updated["current_price"] = round(float(latest_market["price"]), 5)
         refreshed.append(updated)
@@ -546,15 +652,41 @@ def backtest_summary(state: dict) -> dict:
     }
 
 
+def setup_status(settings: dict, market: list[dict]) -> dict:
+    symbols = normalize_symbols(settings.get("symbols", []))
+    deriv_app_id = str(settings.get("deriv_app_id") or "").strip()
+    deriv_token = str(settings.get("deriv_token") or "").strip()
+    live_enabled = bool(settings.get("live_trading_enabled", False))
+    return {
+        "broker_provider": settings.get("broker_provider", "deriv"),
+        "broker_configured": bool(deriv_app_id and deriv_token),
+        "symbols_configured": bool(symbols),
+        "market_snapshots_configured": bool(market),
+        "paper_trading_ready": bool(symbols),
+        "live_trading_enabled": live_enabled,
+        "live_trading_ready": bool(live_enabled and deriv_app_id and deriv_token and symbols),
+        "recommended_next_step": (
+            "Add symbols and market snapshots, then review settings before opening paper trades."
+            if not symbols or not market
+            else (
+                "Live trading is enabled. Test the Deriv connection before placing a live trade."
+                if live_enabled and deriv_app_id and deriv_token
+                else "Configuration looks usable for paper trading."
+            )
+        ),
+    }
+
+
 def bootstrap_payload(state: dict) -> dict:
-    state["portfolio"] = refresh_portfolio_prices(state.get("portfolio", []))
-    market = market_view(state.get("settings", {}))
+    settings = state.get("settings", {})
+    state["portfolio"] = refresh_portfolio_prices(state.get("portfolio", []), settings)
+    market = market_view(settings)
     total_exposure, current_weights = summarize_positions(
         state.get("portfolio", []),
-        state.get("settings", {}).get("rebalance_key_mode", "asset_class"),
+        settings.get("rebalance_key_mode", "asset_class"),
     )
     return {
-        "settings": state.get("settings", {}),
+        "settings": settings,
         "market": market,
         "signals": [row for row in market if row["decision"] != "HOLD"],
         "portfolio": state.get("portfolio", []),
@@ -562,7 +694,9 @@ def bootstrap_payload(state: dict) -> dict:
         "rules": RULES,
         "rebalance_plan": build_rebalance_plan(state),
         "last_backtest": state.get("last_backtest"),
-        "symbols": SYMBOLS,
+        "last_broker_status": state.get("last_broker_status"),
+        "symbols": normalize_symbols(settings.get("symbols", [])),
+        "setup": setup_status(settings, market),
         "stats": {
             "market_count": len(market),
             "signal_count": count_open_signals(market),
@@ -574,14 +708,27 @@ def bootstrap_payload(state: dict) -> dict:
 
 
 def normalize_settings(payload: dict, current: dict) -> dict:
-    merged = {**current}
+    merged = {**current, **runtime_setting_overrides()}
     merged["paper_trading_enabled"] = bool(payload.get("paper_trading_enabled", current.get("paper_trading_enabled", True)))
+    merged["live_trading_enabled"] = bool(payload.get("live_trading_enabled", current.get("live_trading_enabled", False)))
+    merged["broker_provider"] = "deriv"
+    merged["deriv_app_id"] = str(payload_value(payload, "deriv_app_id", current, merged, "") or "").strip()
+    merged["deriv_token"] = str(payload_value(payload, "deriv_token", current, merged, "") or "").strip()
+    merged["deriv_api_url"] = str(payload_value(payload, "deriv_api_url", current, merged, DEFAULT_DERIV_API_URL) or DEFAULT_DERIV_API_URL).strip()
+    merged["deriv_ws_url"] = str(payload_value(payload, "deriv_ws_url", current, merged, DEFAULT_DERIV_WS_URL) or DEFAULT_DERIV_WS_URL).strip()
+    account_mode = str(payload_value(payload, "deriv_options_account_mode", current, merged, "demo")).strip().lower()
+    merged["deriv_options_account_mode"] = account_mode if account_mode in {"demo", "real"} else "demo"
+    merged["deriv_options_account_id"] = str(payload_value(payload, "deriv_options_account_id", current, merged, "") or "").strip()
     risk = str(payload.get("risk_profile", current.get("risk_profile", "balanced"))).strip().lower()
     merged["risk_profile"] = risk if risk in {"conservative", "balanced", "aggressive"} else "balanced"
     try:
         merged["max_open_positions"] = max(1, min(int(payload.get("max_open_positions", current.get("max_open_positions", 6))), 20))
     except Exception:
         merged["max_open_positions"] = current.get("max_open_positions", 6)
+    merged["live_trade_stake"] = sanitize_live_amount(payload.get("live_trade_stake", current.get("live_trade_stake", 1.0)), current.get("live_trade_stake", 1.0))
+    merged["live_trade_currency"] = sanitize_currency(payload.get("live_trade_currency", current.get("live_trade_currency", "USD")), "USD")
+    merged["live_trade_duration"] = sanitize_duration(payload.get("live_trade_duration", current.get("live_trade_duration", 5)), current.get("live_trade_duration", 5))
+    merged["live_trade_duration_unit"] = sanitize_duration_unit(payload.get("live_trade_duration_unit", current.get("live_trade_duration_unit", "t")), current.get("live_trade_duration_unit", "t"))
     merged["rebalance_enabled"] = bool(payload.get("rebalance_enabled", current.get("rebalance_enabled", True)))
     merged["rebalance_key_mode"] = normalize_key_mode(payload.get("rebalance_key_mode", current.get("rebalance_key_mode", "asset_class")))
     try:
@@ -589,13 +736,18 @@ def normalize_settings(payload: dict, current: dict) -> dict:
     except Exception:
         tolerance = current.get("rebalance_tolerance", 0.08)
     merged["rebalance_tolerance"] = max(0.0, min(tolerance, 0.50))
+    merged["symbols"] = normalize_symbols(payload.get("symbols", current.get("symbols", [])))
+    merged["market_snapshots"] = normalize_market_snapshots(
+        payload.get("market_snapshots", current.get("market_snapshots", [])),
+        symbol_map_from_settings(merged),
+    )
     merged["target_allocations"] = normalize_target_allocations(payload.get("target_allocations", current.get("target_allocations", DEFAULT_TARGET_ALLOCATIONS)), merged["rebalance_key_mode"])
     return merged
 
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True, "service": "fx-scalper-community-edition"})
+    return jsonify({"ok": True, "service": "fx-scalper-community", "broker_provider": "deriv"})
 
 
 @app.get("/api/bootstrap")
@@ -616,15 +768,82 @@ def update_config():
     return jsonify({"message": "Settings updated", "settings": state["settings"]})
 
 
+@app.get("/api/broker/status")
+def broker_status():
+    state = load_state()
+    settings = state.get("settings", {})
+    return jsonify(
+        {
+            "status": state.get("last_broker_status"),
+            "setup": setup_status(settings, market_view(settings)),
+        }
+    )
+
+
+@app.post("/api/broker/test")
+def broker_test():
+    state = load_state()
+    settings = state.get("settings", {})
+    if not str(settings.get("deriv_app_id") or "").strip() or not str(settings.get("deriv_token") or "").strip():
+        status = record_broker_status(
+            state,
+            {
+                "ok": False,
+                "connected": False,
+                "message": "Add a Deriv app ID and API token before testing the broker connection.",
+                "token_mode": "pat" if str(settings.get("deriv_token") or "").strip().startswith("pat_") else "legacy",
+            },
+        )
+        save_state(state)
+        return jsonify({"ok": False, "message": status["message"], "status": status})
+    client = deriv_client_from_settings(settings)
+    try:
+        snapshot = client.connect()
+        active_symbols = client.get_active_symbols()
+        options_account_id = str(snapshot.get("options_account_id") or "").strip()
+        if options_account_id:
+            state["settings"]["deriv_options_account_id"] = options_account_id
+        status = record_broker_status(
+            state,
+            {
+                "ok": True,
+                "connected": True,
+                "message": "Deriv connection verified successfully.",
+                "active_symbol_count": len(active_symbols),
+                **snapshot,
+            },
+        )
+        save_state(state)
+        return jsonify({"ok": True, "message": status["message"], "status": status})
+    except DerivServiceError as exc:
+        status = record_broker_status(
+            state,
+            {
+                "ok": False,
+                "connected": False,
+                "message": str(exc),
+                "app_id": client.app_id,
+                "token_mode": client.token_mode,
+                "options_account_mode": settings.get("deriv_options_account_mode", "demo"),
+            },
+        )
+        save_state(state)
+        return jsonify({"ok": False, "message": str(exc), "status": status})
+    finally:
+        client.close()
+
+
 @app.post("/api/paper-trades/open")
 def paper_trade_open():
     state = load_state()
     payload = json_payload()
     settings = state.get("settings", {})
+    symbol_map = symbol_map_from_settings(settings)
+    market_map = {row["symbol"]: row for row in configured_market_snapshots(settings)}
     if not settings.get("paper_trading_enabled", True):
         return error_response("Paper trading is disabled in settings.", 400)
     symbol = str(payload.get("symbol") or "").strip()
-    side = str(payload.get("side") or "BUY").strip().upper()
+    side = sanitize_trade_side(payload.get("side"), "BUY")
     try:
         exposure = float(payload.get("exposure") or 0)
         price = float(payload.get("price") or 0)
@@ -634,9 +853,10 @@ def paper_trade_open():
         return error_response("Invalid paper trade payload.")
     if len(state.get("portfolio", [])) >= int(settings.get("max_open_positions", 6)):
         return error_response("Max open positions reached.")
-    meta = BASE_MARKET_MAP.get(symbol)
+    meta = symbol_map.get(symbol)
     if not meta:
-        return error_response("Unknown symbol.")
+        return error_response("Unknown symbol. Add it in settings before opening a paper trade.")
+    latest_market = market_map.get(symbol)
     position = {
         "id": f"pos-{uuid4().hex[:8]}",
         "symbol": symbol,
@@ -644,7 +864,7 @@ def paper_trade_open():
         "side": side,
         "exposure": round(exposure, 2),
         "entry_price": round(price, 5),
-        "current_price": round(float(meta["price"]), 5),
+        "current_price": round(float((latest_market or {}).get("price") or price), 5),
         "opened_at": utc_now_iso(),
     }
     state.setdefault("portfolio", []).append(position)
@@ -661,6 +881,115 @@ def paper_trade_open():
     )
     save_state(state)
     return jsonify({"message": "Paper trade opened", "position": position})
+
+
+@app.post("/api/live-trades/open")
+def live_trade_open():
+    state = load_state()
+    settings = state.get("settings", {})
+    payload = json_payload()
+    if not settings.get("live_trading_enabled", False):
+        return error_response("Live trading is disabled in settings.", 400)
+    symbol = str(payload.get("symbol") or "").strip()
+    side = sanitize_trade_side(payload.get("side"), "BUY")
+    symbol_map = symbol_map_from_settings(settings)
+    if symbol not in symbol_map:
+        return error_response("Unknown symbol. Add it in settings before placing a live trade.", 400)
+    amount = sanitize_live_amount(payload.get("amount", settings.get("live_trade_stake", 1.0)), settings.get("live_trade_stake", 1.0))
+    duration = sanitize_duration(payload.get("duration", settings.get("live_trade_duration", 5)), settings.get("live_trade_duration", 5))
+    duration_unit = sanitize_duration_unit(
+        payload.get("duration_unit", settings.get("live_trade_duration_unit", "t")),
+        settings.get("live_trade_duration_unit", "t"),
+    )
+    currency = sanitize_currency(payload.get("currency", settings.get("live_trade_currency", "USD")), settings.get("live_trade_currency", "USD"))
+    contract_type = sanitize_live_contract_type(payload.get("contract_type"), side)
+    client = deriv_client_from_settings(settings)
+    try:
+        snapshot = client.connect()
+        proposal = client.propose(
+            symbol=symbol,
+            contract_type=contract_type,
+            amount=amount,
+            duration=duration,
+            duration_unit=duration_unit,
+            currency=currency,
+        )
+        proposal_id = str(proposal.get("id") or proposal.get("proposal_id") or "").strip()
+        if not proposal_id:
+            raise DerivServiceError("Deriv did not return a proposal ID for this trade.")
+        ask_price = sanitize_live_amount(proposal.get("ask_price", amount), amount)
+        buy = client.buy(proposal_id, ask_price)
+        options_account_id = str(snapshot.get("options_account_id") or "").strip()
+        if options_account_id:
+            state["settings"]["deriv_options_account_id"] = options_account_id
+        status = record_broker_status(
+            state,
+            {
+                "ok": True,
+                "connected": True,
+                "message": "Deriv live trade submitted successfully.",
+                **snapshot,
+            },
+        )
+        state.setdefault("trade_history", []).insert(
+            0,
+            {
+                "timestamp": utc_now_iso(),
+                "type": "LIVE_OPEN",
+                "symbol": symbol,
+                "side": side,
+                "exposure": amount,
+                "note": (
+                    f"Live {contract_type} submitted via Deriv community flow. "
+                    f"Contract {buy.get('contract_id') or buy.get('transaction_id') or 'pending'}."
+                ),
+            },
+        )
+        save_state(state)
+        return jsonify(
+            {
+                "message": "Live trade submitted",
+                "status": status,
+                "proposal": proposal,
+                "buy": buy,
+                "request": {
+                    "symbol": symbol,
+                    "side": side,
+                    "contract_type": contract_type,
+                    "amount": amount,
+                    "currency": currency,
+                    "duration": duration,
+                    "duration_unit": duration_unit,
+                },
+            }
+        )
+    except DerivServiceError as exc:
+        status = record_broker_status(
+            state,
+            {
+                "ok": False,
+                "connected": False,
+                "message": str(exc),
+                "app_id": client.app_id,
+                "token_mode": client.token_mode,
+                "options_account_mode": settings.get("deriv_options_account_mode", "demo"),
+            },
+        )
+        state.setdefault("trade_history", []).insert(
+            0,
+            {
+                "timestamp": utc_now_iso(),
+                "type": "LIVE_ERROR",
+                "symbol": symbol,
+                "side": side,
+                "exposure": amount,
+                "note": str(exc),
+            },
+        )
+        save_state(state)
+        return jsonify({"error": str(exc), "status": status}), 400
+    finally:
+        client.close()
 
 
 @app.post("/api/paper-trades/rebalance")
@@ -705,7 +1034,7 @@ def backtests_run():
 def reset():
     state = deepcopy(DEFAULT_STATE)
     save_state(state)
-    return jsonify({"message": "Community edition demo state reset", "settings": state["settings"]})
+    return jsonify({"message": "Community edition state reset", "settings": state["settings"]})
 
 
 if __name__ == "__main__":
