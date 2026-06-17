@@ -1,6 +1,6 @@
-# Market Ops Community
+# FX Scalper Community
 
-Market Ops Community is a public-safe, watered-down companion application for paper trading, simplified rule workflows, and portfolio simulation. It preserves the product shape and workflow while intentionally removing private alpha, live broker execution, and sensitive operational tooling.
+FX Scalper Community is a public-safe, watered-down companion application for paper trading, simplified rule workflows, and portfolio simulation. It preserves the product shape and workflow while intentionally removing private alpha, live broker execution, and sensitive operational tooling.
 
 ## Included
 
