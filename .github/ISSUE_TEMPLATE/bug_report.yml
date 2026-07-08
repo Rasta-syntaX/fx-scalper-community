@@ -1,0 +1,35 @@
+name: Bug Report
+description: Report a bug to help improve the bot
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to fill out this bug report!
+  - type: input
+    id: version
+    attributes:
+      label: Version / Commit
+      description: What version of the bot are you running?
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected to happen
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Paste any relevant log output. This will be auto-formatted.
+      render: shell
+  - type: dropdown
+    id: account-mode
+    attributes:
+      label: Account mode
+      options:
+        - demo
+        - real
+      default: 0

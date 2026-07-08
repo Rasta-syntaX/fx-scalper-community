@@ -1,0 +1,21 @@
+name: Feature Request
+description: Suggest an idea for the community edition
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for your idea! Please check existing issues first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem would this feature solve?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: How would you implement it?
+    validations:
+      required: true

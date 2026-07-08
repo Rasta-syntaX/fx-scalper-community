@@ -1,55 +1,63 @@
-# FX Scalper Community
+# FX Scalper Community Edition 🦀
 
-FX Scalper Community is a self-hosted trading sandbox for rule evaluation, portfolio rebalancing, scenario backtests, paper execution, and optional Deriv live-order submission. It ships with a lightweight Flask backend and Vue 3 frontend so you can configure your own workspace, add your own Deriv credentials, define your own tradable symbols, and test your own market snapshots locally.
+A free, open-source automated trading bot for **Deriv.com** options. Run your own instance, contribute features, and learn algorithmic trading.
 
-## What It Does
+> **Looking for the cloud SaaS version?** Check out [FX Scalper Cloud](https://fxscalper.io) — multi-user, MT5 support, signal master with quant sniper accuracy, portfolio rebalancing, and more.
 
-- stores your workspace configuration locally
-- supports paper-trade entry and portfolio tracking
-- supports Deriv connection testing and optional live-order submission
-- evaluates market snapshots with a simplified public rule stack
-- generates rebalance actions from configurable target allocations
-- runs built-in scenario backtests for quick validation
-- supports deployment at the domain root or under a subpath
+---
 
-## Important Default Behavior
+## ✨ Features
 
-This project does **not** ship with a preloaded broker account, symbol list, or live market feed. A fresh install starts with an empty workspace so you can configure it for your own environment.
+| Feature | Community | Cloud |
+|---------|-----------|-------|
+| Deriv Options automated trading | ✅ | ✅ |
+| Technical indicators (EMA, RSI, MACD, BB) | ✅ | ✅ |
+| Market regime detection (trending/ranging) | ✅ | ✅ |
+| Web dashboard | ✅ | ✅ |
+| Discord/Telegram trade alerts | ✅ | ❌* |
+| Trade journal CSV export | ✅ | ❌* |
+| Demo mode (paper trading) | ✅ | ❌* |
+| Docker one-click deploy | ✅ | ❌* |
+| MT5 CFD trading | ❌ | ✅ |
+| Quant sniper accuracy | ❌ | ✅ |
+| Scalper mode ($ risk sizing, trailing SL) | ❌ | ✅ |
+| Multi-user SaaS | ❌ | ✅ |
+| Portfolio rebalancing | ❌ | ✅ |
+| Push notifications | ❌ | ✅ |
 
-To use it effectively, you should provide:
+\* Community-only features. Cloud has its own notification system.
 
-- your own Deriv app ID
-- your own Deriv API token
-- your own symbol definitions
-- your own market snapshot data
+---
 
-## Project Structure
+## 🚀 Quick Start
 
-- `backend/`: Flask API, local state store, paper-trade engine, Deriv broker layer, rebalance logic, and backtests
-- `frontend/`: Vue 3 dashboard and build configuration
-- `docker-compose.yml`: local multi-service stack for self-hosting
+### Prerequisites
+- Python 3.10+
+- Node.js 18+
+- A [Deriv.com](https://deriv.com) account (demo or real)
+- A Deriv API token ([get one here](https://app.deriv.com/account/api-token))
 
-## Requirements
-
-- Python 3.11 or newer recommended
-- Node.js 20 or newer recommended
-- npm
-
-## Quick Start
-
-### Backend
+### 1. Clone & Setup
 
 ```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/Rasta-syntaX/fx-scalper-ass-community-edition.git
+cd fx-scalper-ass-community-edition
+
+# Backend
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-python3 -m app.server
+cp .env.example .env
+# Edit .env with your Deriv API token
 ```
 
-The backend listens on `http://localhost:5001`.
+### 2. Run Backend
 
-### Frontend
+```bash
+python backend/app.py
+```
+
+### 3. Run Frontend (separate terminal)
 
 ```bash
 cd frontend
@@ -57,210 +65,108 @@ npm install
 npm run dev
 ```
 
-The frontend listens on `http://localhost:5173`.
+Open **http://localhost:5173** in your browser.
 
-## Docker
-
-Start the full stack with:
+### 🐳 Docker (one command)
 
 ```bash
-docker compose up --build
+docker compose up -d
 ```
 
-## First-Time Setup
+Opens on **http://localhost:5000**.
 
-Open the dashboard, go to **Settings**, and provide your own values.
+---
 
-### 1. Add Deriv Credentials
+## ⚙️ Configuration
 
-Enter:
+All configuration is via environment variables (see `.env.example`):
 
-- `Deriv App ID`
-- `Deriv API Token`
-- `Deriv REST URL`
-- `Deriv WebSocket URL`
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DERIV_APP_ID` | `1089` | Deriv application ID |
+| `DERIV_API_TOKEN` | — | Your Deriv API token (required) |
+| `ACCOUNT_MODE` | `demo` | `demo` or `real` |
+| `SYMBOLS` | `frxEURUSD,...` | Comma-separated trading symbols |
+| `MAX_TRADES` | `3` | Max concurrent open trades |
+| `STAKE_AMOUNT` | `1` | Trade stake in USD |
+| `MAX_MULTIPLIER` | `100` | Max multiplier for options |
+| `TRADE_DIRECTION` | `both` | `buy`, `sell`, or `both` |
+| `DAILY_PROFIT_TARGET` | `0` | Stop after hitting this profit (0=off) |
+| `DAILY_LOSS_LIMIT` | `0` | Stop after hitting this loss (0=off) |
+| `DISCORD_WEBHOOK_URL` | — | Discord trade alert webhook |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram bot token for alerts |
+| `TELEGRAM_CHAT_ID` | — | Telegram chat/user ID |
 
-These values are stored locally in the backend data file for your self-hosted instance.
+---
 
-You can also provide credentials through environment variables before starting the backend:
+## 🔔 Webhook Alerts
 
-```bash
-export COMMUNITY_DERIV_APP_ID=your_app_id
-export COMMUNITY_DERIV_TOKEN=your_token
-export COMMUNITY_DERIV_API_URL=https://api.derivws.com
-export COMMUNITY_DERIV_WS_URL=wss://ws.derivws.com/websockets/v3
-export COMMUNITY_DATA_DIR=$HOME/.fx-scalper-community
-python3 -m app.server
+Get trade notifications sent to Discord or Telegram:
+
+**Discord**: Create a webhook in your server settings → Integrations → Webhooks, paste the URL into `DISCORD_WEBHOOK_URL`.
+
+**Telegram**: Create a bot via [@BotFather](https://t.me/botfather), get the token, find your chat ID, set both in `.env`.
+
+Both can run simultaneously.
+
+---
+
+## 📊 Trade Journal
+
+The bot logs every trade to `logs/trade_log.csv`. You can also export your journal from the web dashboard.
+
+---
+
+## 🧪 Demo Mode
+
+Set `ACCOUNT_MODE=demo` in your `.env` to trade on Deriv's demo account (virtual funds). Perfect for testing strategies risk-free.
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│   Vue 3     │────▶│  Flask API   │────▶│  Deriv WS   │
+│  Frontend   │     │   Backend    │     │   Client    │
+└─────────────┘     └──────────────┘     └─────────────┘
+                           │
+                    ┌──────┴──────┐
+                    │  Trading    │
+                    │   Engine    │
+                    └──────┬──────┘
+                           │
+                    ┌──────┴──────┐
+                    │ Indicators  │
+                    │  (TA-Lib)   │
+                    └─────────────┘
 ```
 
-`COMMUNITY_DATA_DIR` is optional and can be used when you want the backend state file stored outside the repository directory.
+---
 
-### 2. Configure Symbols
+## 🤝 Contributing
 
-Paste a JSON array in the **Configured Symbols JSON** field.
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-Example:
+**Ideas for contributions:**
+- Add new indicators or trading strategies
+- Improve the web UI
+- Write tests
+- Add more notification channels (Slack, email)
+- Backtesting engine
+- Better error recovery
 
-```json
-[
-  {
-    "symbol": "frxEURUSD",
-    "label": "EUR/USD",
-    "asset_class": "FOREX"
-  },
-  {
-    "symbol": "cryBTCUSD",
-    "label": "BTC/USD",
-    "asset_class": "CRYPTO"
-  }
-]
-```
+---
 
-Supported asset classes include:
+## 📜 License
 
-- `FOREX`
-- `COMMODITIES`
-- `CRYPTO`
-- `SYNTHETICS`
-- `INDICES`
-- `STOCKS`
-- `CUSTOM`
+MIT — see [LICENSE](LICENSE). Free to use, modify, and distribute.
 
-### 3. Configure Market Snapshots
+---
 
-Paste a JSON array in the **Market Snapshots JSON** field. Each snapshot should reference a configured symbol.
+## 💬 Community
 
-Example:
+- **GitHub Issues**: Bug reports & feature requests
+- **Discussions**: Strategy sharing & Q&A
 
-```json
-[
-  {
-    "symbol": "frxEURUSD",
-    "price": 1.0865,
-    "ema_fast": 1.0862,
-    "ema_slow": 1.0851,
-    "adx": 22,
-    "rsi": 55,
-    "atr_ratio": 1.04,
-    "price_vs_vwap": "above",
-    "candle_quality": "clean",
-    "distance_to_band": 0.45
-  },
-  {
-    "symbol": "cryBTCUSD",
-    "price": 67220,
-    "ema_fast": 67080,
-    "ema_slow": 66990,
-    "adx": 27,
-    "rsi": 60,
-    "atr_ratio": 1.09,
-    "price_vs_vwap": "above",
-    "candle_quality": "clean",
-    "distance_to_band": 0.52
-  }
-]
-```
-
-### 4. Save Settings
-
-After saving:
-
-- the setup checklist updates automatically
-- the signal feed evaluates your snapshots
-- the paper-trade form uses your configured symbols
-- rebalancing uses your portfolio and target allocation settings
-- live-trade defaults are stored for optional broker execution
-
-### 5. Test The Broker Connection
-
-Open the **Broker Connection** panel and run **Test Deriv Connection** after saving your credentials.
-
-The connection test:
-
-- validates that your app ID and token can authenticate
-- resolves the appropriate Deriv account flow for the token type
-- stores the most recent broker status locally in the dashboard state
-- helps confirm readiness before any live order is attempted
-
-PAT tokens use the Deriv options-account flow. Non-PAT tokens use the standard WebSocket authorize flow.
-
-### 6. Optional Live Trading
-
-Live trading is disabled by default. To enable it:
-
-- turn on **Live trading enabled** in **Settings**
-- choose the correct options account mode: `demo` or `real`
-- save your settings
-- test the broker connection
-- submit a live order from **Live Trade Entry** or directly from a qualified signal
-
-The dashboard maps:
-
-- `BUY` to Deriv `CALL`
-- `SELL` to Deriv `PUT`
-
-Live order defaults include:
-
-- stake
-- currency
-- duration
-- duration unit
-
-These values can be adjusted in settings and are applied when submitting a live order.
-
-## Deployment
-
-The frontend can be deployed at the domain root or under a subpath such as:
-
-- `https://www.fx-scalper.com/communityedition/`
-
-### Build For A Subpath
-
-```bash
-cd frontend
-VITE_PUBLIC_BASE_PATH=/communityedition/ npm run build
-```
-
-If the API is exposed at a custom URL, set an explicit base URL during the frontend build:
-
-```bash
-VITE_API_BASE_URL=https://www.fx-scalper.com/communityedition/api/ npm run build
-```
-
-### Reverse Proxy Example
-
-When hosting under `/communityedition/`, configure your reverse proxy to:
-
-- serve the frontend build output at `/communityedition/`
-- forward `/communityedition/api/` to the Flask backend
-- remove the `/communityedition` prefix before forwarding requests to Flask
-
-Example nginx configuration:
-
-```nginx
-location /communityedition/ {
-    alias C:/inetpub/wwwroot/fx-scalper-community/;
-    try_files $uri $uri/ /communityedition/index.html;
-}
-
-location /communityedition/api/ {
-    rewrite ^/communityedition/(api/.*)$ /$1 break;
-    proxy_pass http://127.0.0.1:5001;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-}
-```
-
-This pattern works well with Cloudflare in front of nginx or IIS.
-
-## Notes For Builders
-
-- This project is designed as a self-hosted community base, not a managed service.
-- It defaults to paper trading, local state persistence, and disabled live trading.
-- It is intended to be configured, extended, and adapted to your own workflow.
-- Broker credentials and workspace state are stored locally for your self-hosted instance unless you replace the storage layer.
-
-## Disclaimer
-
-FX Scalper Community is provided for experimentation, simulation, workflow development, and self-directed broker integration. It does not provide financial advice, and you are responsible for reviewing, validating, and safely operating any live connection you enable in your own environment.
+Built with ❤️ by [Rasta-syntaX](https://github.com/Rasta-syntaX)

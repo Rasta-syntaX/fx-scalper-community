@@ -1,20 +1,29 @@
-version: "3.9"
-
 services:
   backend:
-    build:
-      context: ./backend
+    build: .
     ports:
-      - "5001:5001"
+      - "5000:5000"
+    env_file:
+      - .env
     volumes:
-      - ./backend/data:/app/data
+      - ./logs:/app/logs
+      - ./backend:/app/backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
   frontend:
-    build:
-      context: ./frontend
-    environment:
-      VITE_API_PROXY_TARGET: http://backend:5001
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     ports:
       - "5173:5173"
+    volumes:
+      - ./frontend:/app
     depends_on:
       - backend
+    restart: unless-stopped
