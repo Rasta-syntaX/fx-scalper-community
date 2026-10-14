@@ -238,7 +238,11 @@ class DerivCommunityClient:
             "loginid": account.get("loginid") or self._account_id(account),
             "balance": balance_info.get("balance", account.get("balance")),
             "currency": balance_info.get("currency", account.get("currency", "USD")),
-            "account_type": account.get("account_type") or self._account_type(account) or ("options" if self._otp_auth else "legacy"),
+            "account_type": (
+                account.get("account_type")
+                or self._account_type(account)
+                or ("options" if self._otp_auth else "legacy")
+            ),
             "options_account_id": self._account_id(account),
             "connected": True,
         }
@@ -275,4 +279,3 @@ class DerivCommunityClient:
 
     def buy(self, proposal_id: str, price: float) -> dict:
         return self.send({"buy": proposal_id, "price": float(price)}).get("buy") or {}
-

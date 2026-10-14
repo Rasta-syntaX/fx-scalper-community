@@ -27,6 +27,7 @@ const bootstrapData = ref({
   rebalance_plan: { actions: [], current_weights: {}, target_weights: {} },
   last_backtest: null,
   last_broker_status: null,
+  last_scan: null,
   symbols: [],
   stats: {},
   setup: {},
@@ -85,6 +86,7 @@ const symbols = computed(() => bootstrapData.value.symbols || [])
 const lastBacktest = computed(() => bootstrapData.value.last_backtest)
 const lastBrokerStatus = computed(() => bootstrapData.value.last_broker_status || null)
 const setupStatus = computed(() => bootstrapData.value.setup || {})
+const lastScan = computed(() => bootstrapData.value.last_scan || null)
 const liveTradingReady = computed(() => Boolean(setupStatus.value.live_trading_ready))
 const brokerStatusLabel = computed(() => {
   if (lastBrokerStatus.value?.connected) {
@@ -294,6 +296,21 @@ async function saveSettings() {
       }),
     'Settings saved.',
   )
+}
+
+async function scanMarket() {
+  clearMessages()
+  busy.value = true
+  try {
+    const { data } = await api.post('scan')
+    await refreshBootstrapState()
+    setSuccess(data?.message || 'Market scan complete.')
+  } catch (error) {
+    await refreshBootstrapState()
+    setError(error)
+  } finally {
+    busy.value = false
+  }
 }
 
 async function testBrokerConnection() {
@@ -628,6 +645,13 @@ onMounted(fetchBootstrap)
 
             <div class="actions">
               <button class="button" :disabled="busy" @click="saveSettings">Save Settings</button>
+              <button
+                class="button secondary"
+                :disabled="busy || !symbols.length"
+                @click="scanMarket"
+              >
+                Scan Market Now
+              </button>
             </div>
           </div>
         </article>
@@ -806,6 +830,14 @@ onMounted(fetchBootstrap)
           <div class="section-head">
             <h2>Signal Feed</h2>
             <p>Each saved market snapshot is evaluated with the simplified public rule stack.</p>
+            <p v-if="lastScan" class="note">
+              Last scan {{ lastScan.at }} · source {{ lastScan.source }} ·
+              {{ lastScan.scanned }}/{{ lastScan.configured_symbols }} symbol(s) ·
+              {{ (lastScan.errors || []).length }} error(s)
+            </p>
+            <p v-if="lastScan && lastScan.errors && lastScan.errors.length" class="note">
+              {{ lastScan.errors.map((item) => item.symbol + ': ' + item.error).join(' | ') }}
+            </p>
           </div>
           <div class="section-body grid-cards">
             <div v-for="row in market" :key="row.symbol" class="item-card">
@@ -853,7 +885,8 @@ onMounted(fetchBootstrap)
               </div>
             </div>
             <div v-if="!market.length" class="empty-state">
-              No market snapshots configured yet. Add snapshot JSON in Settings to generate signals.
+              No market snapshots yet. Add symbols in Settings, then press Scan Market Now to read
+              candles and generate signals. You can also paste snapshot JSON in Settings by hand.
             </div>
           </div>
         </article>

@@ -11,8 +11,9 @@ A free, open-source automated trading bot for **Deriv.com** options. Run your ow
 | Feature | Community | Cloud |
 |---------|-----------|-------|
 | Deriv Options automated trading | ✅ | ✅ |
-| Technical indicators (EMA, RSI, MACD, BB) | ✅ | ✅ |
+| Technical indicators (EMA, RSI, ADX, ATR, Bollinger, VWAP) | ✅ | ✅ |
 | Market regime detection (trending/ranging) | ✅ | ✅ |
+| Reads its own candles from Deriv (`POST /api/scan`) | ✅ | ✅ |
 | Web dashboard | ✅ | ✅ |
 | Discord/Telegram trade alerts | ✅ | ❌* |
 | Trade journal CSV export | ✅ | ❌* |
@@ -40,13 +41,13 @@ A free, open-source automated trading bot for **Deriv.com** options. Run your ow
 ### 1. Clone & Setup
 
 ```bash
-git clone https://github.com/Rasta-syntaX/fx-scalper-ass-community-edition.git
-cd fx-scalper-ass-community-edition
+git clone https://github.com/Rasta-syntaX/fx-scalper-community.git
+cd fx-scalper-community
 
 # Backend
 python3 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -r backend/requirements.txt
 cp .env.example .env
 # Edit .env with your Deriv API token
 ```
@@ -99,6 +100,49 @@ All configuration is via environment variables (see `.env.example`):
 
 ---
 
+## 📈 Market Data & Scanning
+
+The rule engine evaluates *market snapshots*. `POST /api/scan` builds them for you: it fetches
+candles, computes the indicators, and feeds the same rule engine the dashboard already uses.
+
+```bash
+curl -X POST http://localhost:5000/api/scan
+```
+
+Pick the data source with environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COMMUNITY_MARKET_SOURCE` | `deriv` | `deriv` for live candles, `replay` for a JSON fixture |
+| `COMMUNITY_REPLAY_FILE` | — | Path to the replay fixture (required when source is `replay`) |
+| `COMMUNITY_DATA_DIR` | `backend/data` | Directory holding `store.json` |
+
+The same values can be set through `POST /api/config` as `market_source`, `market_replay_file`,
+`market_granularity` (candle size in seconds) and `market_candle_count`.
+
+### Try it with no credentials
+
+A sample candle fixture ships in the repo, so you can watch the engine produce signals without
+a Deriv account:
+
+```bash
+COMMUNITY_MARKET_SOURCE=replay \
+COMMUNITY_REPLAY_FILE=backend/data/replay_sample.json \
+python backend/app/server.py
+```
+
+Add `frxEURUSD` under Settings → Configured Symbols JSON, save, then press **Scan Market Now**.
+The Signal Feed fills from real indicator maths: EMA fast/slow, ADX, RSI, ATR ratio, a VWAP
+position, Bollinger band proximity and a candle quality check.
+
+### Indicators
+
+Implemented in `backend/app/indicators.py` using the standard library only — no TA-Lib, no
+pandas, no numpy. Each function returns a series aligned to its input, using `None` while the
+window is still warming up.
+
+---
+
 ## 🔔 Webhook Alerts
 
 Get trade notifications sent to Discord or Telegram:
@@ -123,6 +167,20 @@ Set `ACCOUNT_MODE=demo` in your `.env` to trade on Deriv's demo account (virtual
 
 ---
 
+## 🧪 Tests
+
+```bash
+pip install -r backend/requirements-dev.txt
+python -m pytest tests/ -v
+flake8 backend/app
+```
+
+The suite covers the indicator maths, both market data providers, and the frozen snapshot
+contract — including an end-to-end trending-candles → BUY and falling-candles → SELL check
+through the real rule engine and the real Flask API.
+
+---
+
 ## 🏗️ Architecture
 
 ```
@@ -138,7 +196,13 @@ Set `ACCOUNT_MODE=demo` in your `.env` to trade on Deriv's demo account (virtual
                            │
                     ┌──────┴──────┐
                     │ Indicators  │
-                    │  (TA-Lib)   │
+                    │  (stdlib)   │
+                    └──────┬──────┘
+                           │
+                    ┌──────┴──────┐
+                    │   Candles   │
+                    │ Deriv/       │
+                    │ replay       │
                     └─────────────┘
 ```
 

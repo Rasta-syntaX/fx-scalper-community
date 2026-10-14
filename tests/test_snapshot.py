@@ -19,9 +19,9 @@ from app.snapshot import (
 )
 from app.server import evaluate_snapshot, normalize_market_snapshots
 
-DRIFT = 0.00018
-AMPLITUDE = 0.0018
-PERIOD = 2.5
+DRIFT = 0.00016
+AMPLITUDE = 0.0024
+PERIOD = 3.0
 BALANCED = {"risk_profile": "balanced"}
 SYMBOL_MAP = {"frxEURUSD": {"symbol": "frxEURUSD", "asset_class": "FOREX"}}
 
@@ -108,8 +108,8 @@ def test_a_trending_series_drives_the_engine_to_a_buy(make_candles):
 
 def test_a_falling_series_drives_the_engine_to_a_sell(make_candles):
     # A straight mirror of the bullish fixture lands RSI outside the bearish
-    # band, so this fixture is tuned to sit inside it.
-    values = closes(drift=-0.00008, amplitude=0.0018, period=3.5, base=1.18)
+    # band, so this fixture is tuned to sit inside it with room to spare.
+    values = closes(drift=-0.00010, amplitude=0.0024, period=3.5, base=1.18)
     snapshot = build_snapshot("frxEURUSD", "FOREX", candles_for(make_candles, values))
     decision = evaluate_snapshot(dict(snapshot), BALANCED)
     assert decision["regime"] == "TRENDING"

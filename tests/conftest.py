@@ -6,12 +6,18 @@ in backend/.
 
 import os
 import sys
+import tempfile
 
 import pytest
 
 BACKEND = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "backend")
 if BACKEND not in sys.path:
     sys.path.insert(0, BACKEND)
+
+# Keep the suite away from the developer's real store.json. app.server resolves
+# its data directory at import time, so this has to run before any test module
+# imports it.
+os.environ.setdefault("COMMUNITY_DATA_DIR", tempfile.mkdtemp(prefix="fx-scalper-community-tests-"))
 
 
 @pytest.fixture
