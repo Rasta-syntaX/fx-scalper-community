@@ -2,15 +2,18 @@ services:
   backend:
     build: .
     ports:
-      - "5000:5000"
+      - "5001:5001"
     env_file:
       - .env
+    environment:
+      FLASK_HOST: 0.0.0.0
+      FLASK_PORT: "5001"
     volumes:
       - ./logs:/app/logs
       - ./backend:/app/backend
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/api/health')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -20,10 +23,13 @@ services:
     image: node:20-alpine
     working_dir: /app
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    environment:
+      VITE_API_PROXY_TARGET: http://backend:5001
     ports:
       - "5173:5173"
     volumes:
       - ./frontend:/app
+      - /app/node_modules
     depends_on:
       - backend
     restart: unless-stopped

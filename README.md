@@ -49,14 +49,20 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r backend/requirements.txt
 cp .env.example .env
-# Edit .env with your Deriv API token
 ```
+
+Your Deriv app ID and API token are entered in the dashboard under **Settings** (or exported as
+`COMMUNITY_DERIV_APP_ID` / `COMMUNITY_DERIV_TOKEN` before starting the backend).
 
 ### 2. Run Backend
 
 ```bash
-python backend/app.py
+cd backend
+python -m app.server
 ```
+
+The API listens on **http://127.0.0.1:5001** (`FLASK_HOST` / `FLASK_PORT` to change it). The Vite
+dev server proxies `/api` there automatically.
 
 ### 3. Run Frontend (separate terminal)
 
@@ -74,7 +80,8 @@ Open **http://localhost:5173** in your browser.
 docker compose up -d
 ```
 
-Opens on **http://localhost:5000**.
+Dashboard on **http://localhost:5173**, API on **http://localhost:5001**. Run `cp .env.example .env`
+first — Compose reads it.
 
 ---
 
@@ -106,7 +113,7 @@ The rule engine evaluates *market snapshots*. `POST /api/scan` builds them for y
 candles, computes the indicators, and feeds the same rule engine the dashboard already uses.
 
 ```bash
-curl -X POST http://localhost:5000/api/scan
+curl -X POST http://localhost:5001/api/scan
 ```
 
 Pick the data source with environment variables:
@@ -126,9 +133,10 @@ A sample candle fixture ships in the repo, so you can watch the engine produce s
 a Deriv account:
 
 ```bash
+cd backend
 COMMUNITY_MARKET_SOURCE=replay \
-COMMUNITY_REPLAY_FILE=backend/data/replay_sample.json \
-python backend/app/server.py
+COMMUNITY_REPLAY_FILE=data/replay_sample.json \
+python -m app.server
 ```
 
 Add `frxEURUSD` under Settings → Configured Symbols JSON, save, then press **Scan Market Now**.
