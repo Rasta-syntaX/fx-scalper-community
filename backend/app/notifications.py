@@ -1,16 +1,35 @@
 """
-webhooks.py — Send trade notifications to Discord & Telegram.
+Discord & Telegram trade notifications.
 
-Used by the trading engine to broadcast trade events. Both channels
-can run simultaneously; configure via environment variables.
+app.server calls notify_event() for every journal entry. Both channels can run
+simultaneously; each is enabled by its environment variables and silently
+skipped otherwise.
 """
 import os
+import re
+import threading
+from datetime import datetime, timezone
+
 import requests
-from datetime import datetime
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _fmt_ts() -> str:
-    return datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+    return _utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+
+
+def _discord_text(message: str) -> str:
+    """Discord uses Markdown, not HTML."""
+    return re.sub(r"</?b>", "**", message)
+
+
+def channels_configured() -> bool:
+    discord = bool(os.getenv('DISCORD_WEBHOOK_URL', '').strip())
+    telegram = bool(os.getenv('TELEGRAM_BOT_TOKEN', '').strip() and os.getenv('TELEGRAM_CHAT_ID', '').strip())
+    return discord or telegram
 
 
 def send_discord(message: str, embed: dict = None) -> bool:
@@ -18,7 +37,7 @@ def send_discord(message: str, embed: dict = None) -> bool:
     url = os.getenv('DISCORD_WEBHOOK_URL', '').strip()
     if not url:
         return False
-    payload = {"content": message[:2000]}
+    payload = {"content": _discord_text(message)[:2000]}
     if embed:
         payload["embeds"] = [embed]
     try:
@@ -67,7 +86,7 @@ def notify_trade_opened(symbol: str, direction: str, stake: float, price: float,
             {"name": "Entry", "value": f"{price:.5f}", "inline": True},
             {"name": "Regime", "value": regime, "inline": True},
         ],
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": _utcnow().isoformat(),
     }
     send_discord(msg, discord_embed)
     send_telegram(f"<b>{emoji} Trade Opened</b>\n{symbol} {direction} | ${stake:.2f} @ {price:.5f}")
@@ -93,7 +112,7 @@ def notify_trade_closed(symbol: str, direction: str, profit: float, reason: str)
             {"name": "P&L", "value": f"${profit:+.2f}", "inline": True},
             {"name": "Reason", "value": reason, "inline": False},
         ],
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": _utcnow().isoformat(),
     }
     send_discord(msg, discord_embed)
     send_telegram(
@@ -112,3 +131,43 @@ def notify_error(symbol: str, error: str):
     )
     send_discord(msg)
     send_telegram(msg)
+
+
+EVENT_TITLES = {
+    "OPEN": ("🟢", "Paper trade opened"),
+    "LIVE_OPEN": ("🚀", "Live trade submitted"),
+    "LIVE_ERROR": ("⚠️", "Live trade failed"),
+    "REBALANCE_CLOSE": ("🔁", "Position closed by rebalance"),
+}
+
+
+def format_event(entry: dict) -> str:
+    emoji, title = EVENT_TITLES.get(entry.get("type", ""), ("ℹ️", str(entry.get("type") or "Event")))
+    lines = [f"{emoji} <b>{title}</b>"]
+    if entry.get("symbol"):
+        lines.append(f"Symbol: {entry['symbol']} {entry.get('side') or ''}".rstrip())
+    try:
+        lines.append(f"Amount: ${float(entry.get('exposure') or 0):.2f}")
+    except (TypeError, ValueError):
+        pass
+    if entry.get("note"):
+        lines.append(str(entry["note"]))
+    lines.append(f"Time: {entry.get('timestamp') or _fmt_ts()}")
+    return "\n".join(lines)
+
+
+def _deliver(message: str) -> None:
+    send_discord(message)
+    send_telegram(message)
+
+
+def notify_event(entry: dict, background: bool = True) -> bool:
+    """Send a journal entry to every configured channel. Returns False if none is configured."""
+    if entry.get("type") not in EVENT_TITLES or not channels_configured():
+        return False
+    message = format_event(entry)
+    if background:
+        threading.Thread(target=_deliver, args=(message,), daemon=True).start()
+    else:
+        _deliver(message)
+    return True
