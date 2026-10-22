@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import os
 from copy import deepcopy
@@ -29,7 +30,41 @@ from app.notifications import notify_event
 from app.snapshot import build_market_snapshots
 
 app = Flask(__name__)
-CORS(app)
+
+DEFAULT_CORS_ORIGINS = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+)
+
+
+def cors_origins() -> object:
+    raw = os.getenv("COMMUNITY_CORS_ORIGINS", "").strip()
+    if raw == "*":
+        return "*"
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return list(DEFAULT_CORS_ORIGINS)
+
+
+CORS(app, resources={r"/api/*": {"origins": cors_origins()}})
+
+PUBLIC_API_PATHS = {"/api/health"}
+
+
+@app.before_request
+def require_api_key():
+    expected = os.getenv("COMMUNITY_API_KEY", "").strip()
+    if not expected or request.method == "OPTIONS":
+        return None
+    if not request.path.startswith("/api/") or request.path in PUBLIC_API_PATHS:
+        return None
+    provided = request.headers.get("X-API-Key", "")
+    if hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):
+        return None
+    return jsonify({"error": "Missing or invalid API key. Send it in the X-API-Key header."}), 401
+
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 
@@ -796,6 +831,17 @@ def setup_status(settings: dict, market: list[dict]) -> dict:
     }
 
 
+def public_settings(settings: dict) -> dict:
+    """Settings as returned to clients: the Deriv token never leaves the server."""
+    token = str(settings.get("deriv_token") or "").strip()
+    return {
+        **settings,
+        "deriv_token": "",
+        "deriv_token_set": bool(token),
+        "deriv_token_mode": ("pat" if token.startswith("pat_") else "legacy") if token else None,
+    }
+
+
 def bootstrap_payload(state: dict) -> dict:
     settings = state.get("settings", {})
     state["portfolio"] = refresh_portfolio_prices(state.get("portfolio", []), settings)
@@ -805,7 +851,7 @@ def bootstrap_payload(state: dict) -> dict:
         settings.get("rebalance_key_mode", "asset_class"),
     )
     return {
-        "settings": settings,
+        "settings": public_settings(settings),
         "market": market,
         "signals": [row for row in market if row["decision"] != "HOLD"],
         "portfolio": state.get("portfolio", []),
@@ -837,7 +883,13 @@ def normalize_settings(payload: dict, current: dict) -> dict:
     )
     merged["broker_provider"] = "deriv"
     merged["deriv_app_id"] = str(payload_value(payload, "deriv_app_id", current, merged, "") or "").strip()
-    merged["deriv_token"] = str(payload_value(payload, "deriv_token", current, merged, "") or "").strip()
+    incoming_token = str(payload.get("deriv_token") or "").strip()
+    if payload.get("clear_deriv_token"):
+        merged["deriv_token"] = ""
+    elif incoming_token:
+        merged["deriv_token"] = incoming_token
+    else:
+        merged["deriv_token"] = str(merged.get("deriv_token") or current.get("deriv_token") or "").strip()
     merged["deriv_api_url"] = str(
         payload_value(payload, "deriv_api_url", current, merged, DEFAULT_DERIV_API_URL)
         or DEFAULT_DERIV_API_URL
@@ -969,7 +1021,7 @@ def update_config():
     state = load_state()
     state["settings"] = normalize_settings(json_payload(), state.get("settings", {}))
     save_state(state)
-    return jsonify({"message": "Settings updated", "settings": state["settings"]})
+    return jsonify({"message": "Settings updated", "settings": public_settings(state["settings"])})
 
 
 @app.get("/api/broker/status")
@@ -1257,7 +1309,7 @@ def backtests_run():
 def reset():
     state = deepcopy(DEFAULT_STATE)
     save_state(state)
-    return jsonify({"message": "Community edition state reset", "settings": state["settings"]})
+    return jsonify({"message": "Community edition state reset", "settings": public_settings(state["settings"])})
 
 
 if __name__ == "__main__":

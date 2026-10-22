@@ -151,6 +151,20 @@ window is still warming up.
 
 ---
 
+## 🔒 Security
+
+This bot can place real trades, so treat the API like a wallet:
+
+- The saved Deriv token is **write-only**: `/api/bootstrap` and `/api/config` return
+  `deriv_token: ""` plus `deriv_token_set` / `deriv_token_mode`. Leave the field blank to keep the
+  saved token, or press **Forget saved token** to clear it.
+- Set `COMMUNITY_API_KEY` to require an `X-API-Key` header on every `/api/*` route except
+  `/api/health`. Do this whenever the backend is reachable from anything other than your own machine.
+- CORS only allows the local dashboard origins by default. Set `COMMUNITY_CORS_ORIGINS` if you host
+  the frontend elsewhere.
+
+---
+
 ## 🔔 Webhook Alerts
 
 Get trade notifications sent to Discord or Telegram:

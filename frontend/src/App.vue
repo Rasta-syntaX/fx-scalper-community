@@ -13,6 +13,30 @@ const api = axios.create({
   baseURL: apiBaseUrl,
 })
 
+const API_KEY_STORAGE = 'fx-scalper-community-api-key'
+
+api.interceptors.request.use((config) => {
+  const key = window.localStorage.getItem(API_KEY_STORAGE)
+  if (key) {
+    config.headers['X-API-Key'] = key
+  }
+  return config
+})
+
+api.interceptors.response.use(undefined, (error) => {
+  const config = error?.config
+  if (error?.response?.status !== 401 || !config || config._apiKeyRetried) {
+    return Promise.reject(error)
+  }
+  const key = window.prompt('This backend requires an API key (COMMUNITY_API_KEY). Enter it:')
+  if (!key) {
+    return Promise.reject(error)
+  }
+  window.localStorage.setItem(API_KEY_STORAGE, key.trim())
+  config._apiKeyRetried = true
+  return api.request(config)
+})
+
 const loading = ref(true)
 const busy = ref(false)
 const errorMessage = ref('')
@@ -118,8 +142,13 @@ const brokerTokenLabel = computed(() => {
   if (lastBrokerStatus.value?.token_mode === 'legacy') {
     return 'Legacy'
   }
-  return settingsForm.deriv_token?.startsWith('pat_') ? 'PAT' : 'Legacy'
+  if (settingsForm.deriv_token) {
+    return settingsForm.deriv_token.startsWith('pat_') ? 'PAT' : 'Legacy'
+  }
+  return bootstrapData.value.settings?.deriv_token_mode === 'pat' ? 'PAT' : 'Legacy'
 })
+
+const derivTokenSaved = computed(() => Boolean(bootstrapData.value.settings?.deriv_token_set))
 
 const marketMap = computed(() => {
   return Object.fromEntries(market.value.map((row) => [row.symbol, row]))
@@ -252,6 +281,10 @@ async function runAction(action, successText) {
   } finally {
     busy.value = false
   }
+}
+
+async function forgetDerivToken() {
+  await runAction(() => api.post('config', { clear_deriv_token: true }), 'Saved Deriv token removed.')
 }
 
 async function saveSettings() {
@@ -529,7 +562,22 @@ onMounted(fetchBootstrap)
               </div>
               <div class="field">
                 <label>Deriv API Token</label>
-                <input v-model="settingsForm.deriv_token" class="input" type="password" placeholder="Paste your Deriv token" />
+                <input
+                  v-model="settingsForm.deriv_token"
+                  class="input"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="derivTokenSaved ? 'Saved — leave blank to keep it' : 'Paste your Deriv token'"
+                />
+                <button
+                  v-if="derivTokenSaved"
+                  class="button secondary"
+                  type="button"
+                  :disabled="busy"
+                  @click="forgetDerivToken"
+                >
+                  Forget saved token
+                </button>
               </div>
               <div class="field">
                 <label>Deriv REST URL</label>
