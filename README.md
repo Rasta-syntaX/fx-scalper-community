@@ -241,4 +241,4 @@ MIT — see [LICENSE](LICENSE). Free to use, modify, and distribute.
 - **GitHub Issues**: Bug reports & feature requests
 - **Discussions**: Strategy sharing & Q&A
 
-Built with ❤️ by [Rasta-syntaX](https://github.com/Rasta-syntaX)
+Built with ❤️ by [Rasta-syntaX](https://github.com/Rasta-syntaX) and contributors
