@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import threading
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -25,6 +26,16 @@ from app.market_data import (
     provider_from_settings,
     validate_granularity,
 )
+from app.autotrader import (
+    default_auto_state,
+    due_positions,
+    limit_breached,
+    paper_pnl,
+    pick_entries,
+    roll_day,
+    utcnow,
+)
+from app.brokers import BrokerError, live_broker_from_settings
 from app.journal import append_entry, export_csv
 from app.notifications import notify_event
 from app.backtest import clamp_int, run_backtest
@@ -193,12 +204,19 @@ DEFAULT_STATE = {
         "market_replay_file": "",
         "market_granularity": 300,
         "market_candle_count": 200,
+        "trade_direction": "both",
+        "daily_profit_target": 0.0,
+        "daily_loss_limit": 0.0,
+        "auto_scan_interval_seconds": 300,
+        "auto_hold_minutes": 25,
+        "auto_paper_exposure": 100.0,
     },
     "portfolio": [],
     "trade_history": [],
     "last_backtest": None,
     "last_broker_status": None,
     "last_scan": None,
+    "auto_trader": default_auto_state(),
 }
 
 
@@ -379,6 +397,7 @@ def sanitize_position(raw_position: object, symbol_map: dict[str, dict]) -> Opti
         "entry_price": round(entry_price, 5),
         "current_price": round(current_price, 5),
         "opened_at": str(raw_position.get("opened_at") or utc_now_iso()),
+        "auto": bool(raw_position.get("auto")),
     }
 
 
@@ -421,7 +440,17 @@ def sanitize_state(state: object) -> dict:
     clean_state["last_backtest"] = raw.get("last_backtest")
     clean_state["last_broker_status"] = raw.get("last_broker_status")
     clean_state["last_scan"] = raw.get("last_scan")
+    clean_state["auto_trader"] = sanitize_auto_state(raw.get("auto_trader"))
     return clean_state
+
+
+def sanitize_auto_state(raw: object) -> dict:
+    auto = default_auto_state()
+    if isinstance(raw, dict):
+        auto.update({key: raw[key] for key in auto if key in raw})
+    if not isinstance(auto["pending_live"], list):
+        auto["pending_live"] = []
+    return auto
 
 
 def record_event(state: dict, entry: dict) -> dict:
@@ -913,6 +942,7 @@ def bootstrap_payload(state: dict) -> dict:
         "last_backtest": state.get("last_backtest"),
         "last_broker_status": state.get("last_broker_status"),
         "last_scan": state.get("last_scan"),
+        "auto_trader": state.get("auto_trader") or default_auto_state(),
         "symbols": normalize_symbols(settings.get("symbols", [])),
         "setup": setup_status(settings, market),
         "stats": {
@@ -923,6 +953,28 @@ def bootstrap_payload(state: dict) -> dict:
             "current_weights": {key: round(value, 4) for key, value in current_weights.items()},
         },
     }
+
+
+AUTO_NUMBER_SETTINGS = (
+    ("daily_profit_target", 0.0, 0.0, 1e9),
+    ("daily_loss_limit", 0.0, 0.0, 1e9),
+    ("auto_scan_interval_seconds", 300, 30, 3600),
+    ("auto_hold_minutes", 25, 1, 1440),
+    ("auto_paper_exposure", 100.0, 1.0, 1e9),
+)
+
+
+def normalize_auto_settings(payload: dict, current: dict) -> dict:
+    direction = str(payload.get("trade_direction", current.get("trade_direction", "both")) or "both").strip().lower()
+    cleaned: dict[str, object] = {"trade_direction": direction if direction in {"both", "buy", "sell"} else "both"}
+    for key, default, low, high in AUTO_NUMBER_SETTINGS:
+        try:
+            value = float(payload.get(key, current.get(key, default)))
+        except (TypeError, ValueError):
+            value = float(current.get(key, default))
+        value = max(low, min(high, value))
+        cleaned[key] = int(value) if isinstance(default, int) else round(value, 2)
+    return cleaned
 
 
 def normalize_settings(payload: dict, current: dict) -> dict:
@@ -1010,6 +1062,7 @@ def normalize_settings(payload: dict, current: dict) -> dict:
         )
     except Exception:
         merged["market_candle_count"] = current.get("market_candle_count", 200)
+    merged.update(normalize_auto_settings(payload, current))
     merged["symbols"] = normalize_symbols(payload.get("symbols", current.get("symbols", [])))
     merged["market_snapshots"] = normalize_market_snapshots(
         payload.get("market_snapshots", current.get("market_snapshots", [])),
@@ -1357,14 +1410,230 @@ def backtests_run():
     return jsonify({"message": "Backtests completed", "summary": state["last_backtest"]})
 
 
+AUTO_LOCK = threading.RLock()
+_auto_stop = threading.Event()
+_auto_thread: Optional[threading.Thread] = None
+
+
+def auto_event(
+    state: dict, kind: str, symbol: str = "", side: str = "", exposure: object = 0.0, note: str = ""
+) -> None:
+    record_event(
+        state,
+        {
+            "timestamp": utc_now_iso(),
+            "type": kind,
+            "symbol": symbol,
+            "side": side,
+            "exposure": round(float(exposure or 0.0), 2),
+            "note": note,
+        },
+    )
+
+
+def settle_live_trades(state: dict, auto: dict, broker) -> None:
+    still_pending = []
+    for item in auto["pending_live"]:
+        try:
+            status = broker.trade_status(item["ref"])
+        except BrokerError as exc:
+            auto["last_error"] = str(exc)
+            still_pending.append(item)
+            continue
+        if not status.get("settled"):
+            still_pending.append(item)
+            continue
+        auto["realized_pnl"] = round(float(auto["realized_pnl"]) + float(status["profit"]), 2)
+        auto_event(
+            state, "LIVE_SETTLED", item["symbol"], item["side"], item["stake"],
+            f"Contract {item['ref']} settled {float(status['profit']):+.2f}.",
+        )
+    auto["pending_live"] = still_pending
+
+
+def close_due_paper_positions(state: dict, auto: dict, now) -> None:
+    settings = state["settings"]
+    prices = {row["symbol"]: row["price"] for row in configured_market_snapshots(settings)}
+    for position in due_positions(state.get("portfolio", []), now, settings.get("auto_hold_minutes", 25)):
+        price = float(prices.get(position["symbol"]) or position["current_price"])
+        pnl = paper_pnl(position, price)
+        state["portfolio"] = [row for row in state["portfolio"] if row["id"] != position["id"]]
+        auto["realized_pnl"] = round(float(auto["realized_pnl"]) + pnl, 2)
+        auto_event(
+            state, "AUTO_CLOSE", position["symbol"], position["side"], position["exposure"],
+            f"Closed at {price} after the hold time. P&L {pnl:+.2f}.",
+        )
+
+
+def open_paper_auto_trade(state: dict, signal: dict) -> tuple:
+    exposure = float(state["settings"].get("auto_paper_exposure", 100.0))
+    price = round(float(signal["price"]), 5)
+    state.setdefault("portfolio", []).append(
+        {
+            "id": f"pos-{uuid4().hex[:8]}",
+            "symbol": signal["symbol"],
+            "asset_class": signal["asset_class"],
+            "side": signal["decision"],
+            "exposure": round(exposure, 2),
+            "entry_price": price,
+            "current_price": price,
+            "opened_at": utc_now_iso(),
+            "auto": True,
+        }
+    )
+    return exposure, f"Auto paper {signal['decision']} at {price}: {signal.get('reason', '')}"
+
+
+def open_auto_trades(state: dict, auto: dict, broker) -> None:
+    settings = state["settings"]
+    if auto["mode"] == "paper" and not settings.get("paper_trading_enabled", True):
+        return
+    held = state.get("portfolio", []) + [{"symbol": item["symbol"]} for item in auto["pending_live"]]
+    for signal in pick_entries(market_view(settings), held, settings, len(held)):
+        symbol, side = signal["symbol"], signal["decision"]
+        if auto["mode"] == "live":
+            stake = float(settings.get("live_trade_stake", 1.0))
+            try:
+                trade = broker.open_trade(symbol=symbol, side=side, amount=stake)
+            except BrokerError as exc:
+                auto["last_error"] = str(exc)
+                auto_event(state, "AUTO_ERROR", symbol, side, stake, str(exc))
+                continue
+            exposure = trade["price"]
+            auto["pending_live"].append(
+                {"ref": trade["ref"], "symbol": symbol, "side": side, "stake": exposure, "opened_at": utc_now_iso()}
+            )
+            note = f"Live {trade.get('contract_type', '')} via {broker.name}, contract {trade['ref'] or 'pending'}."
+        else:
+            exposure, note = open_paper_auto_trade(state, signal)
+        auto["trades_today"] = int(auto["trades_today"]) + 1
+        auto_event(state, "AUTO_OPEN", symbol, side, exposure, note)
+        if limit_breached(auto, settings):
+            break
+
+
+def auto_trade_tick(now=None) -> dict:
+    """One pass of the loop: settle, scan, close due paper trades, enforce daily limits, open trades."""
+    now = now or utcnow()
+    with AUTO_LOCK:
+        state = load_state()
+        auto = roll_day(state["auto_trader"], now)
+        if not auto["running"]:
+            return auto
+        broker = None
+        try:
+            if auto["mode"] == "live":
+                broker = live_broker_from_settings(state["settings"])
+                settle_live_trades(state, auto, broker)
+            report = run_market_scan(state)
+            if report.get("errors") and not report.get("scanned"):
+                auto["last_error"] = report["errors"][0]["error"]
+            close_due_paper_positions(state, auto, now)
+            reason = limit_breached(auto, state["settings"])
+            if reason:
+                if not auto["halted_reason"]:
+                    auto_event(state, "AUTO_HALT", note=reason)
+                auto["halted_reason"] = reason
+            else:
+                open_auto_trades(state, auto, broker)
+        except BrokerError as exc:
+            auto["last_error"] = str(exc)
+        finally:
+            if broker is not None:
+                broker.close()
+        auto["last_tick"] = utc_now_iso()
+        state["auto_trader"] = auto
+        save_state(state)
+        return auto
+
+
+def _auto_loop() -> None:
+    while True:
+        try:
+            auto = auto_trade_tick()
+            if not auto.get("running"):
+                return
+            interval = int(load_state()["settings"].get("auto_scan_interval_seconds", 300))
+        except Exception:
+            app.logger.exception("auto-trader tick failed")
+            interval = 60
+        if _auto_stop.wait(interval):
+            return
+
+
+def start_auto_thread() -> None:
+    global _auto_thread
+    if _auto_thread is not None and _auto_thread.is_alive():
+        return
+    _auto_stop.clear()
+    _auto_thread = threading.Thread(target=_auto_loop, name="auto-trader", daemon=True)
+    _auto_thread.start()
+
+
+def stop_auto_thread() -> None:
+    _auto_stop.set()
+
+
+def set_auto_running(running: bool, mode: str = "paper") -> dict:
+    with AUTO_LOCK:
+        state = load_state()
+        auto = state["auto_trader"]
+        was_running = bool(auto["running"])
+        auto["running"] = running
+        if running:
+            auto.update({"mode": mode, "started_at": utc_now_iso(), "last_error": ""})
+            auto_event(state, "AUTO_START", note=f"Auto-trader started in {mode} mode.")
+        elif was_running:
+            auto_event(state, "AUTO_STOP", note="Auto-trader stopped.")
+        save_state(state)
+        return auto
+
+
+@app.get("/api/auto")
+def auto_status():
+    return jsonify(load_state()["auto_trader"])
+
+
+@app.post("/api/auto/start")
+def auto_start():
+    mode = str(json_payload().get("mode") or "paper").strip().lower()
+    settings = load_state()["settings"]
+    if mode not in {"paper", "live"}:
+        return error_response("mode must be 'paper' or 'live'.")
+    if mode == "live" and not settings.get("live_trading_enabled", False):
+        return error_response("Enable live trading in settings before starting live auto-trading.")
+    if mode == "paper" and not settings.get("paper_trading_enabled", True):
+        return error_response("Paper trading is disabled in settings.")
+    if not normalize_symbols(settings.get("symbols", [])):
+        return error_response("Add symbols before starting the auto-trader.")
+    auto = set_auto_running(True, mode)
+    if not app.config.get("TESTING"):
+        start_auto_thread()
+    return jsonify({"message": f"Auto-trader started ({mode}).", "auto_trader": auto})
+
+
+@app.post("/api/auto/stop")
+def auto_stop():
+    stop_auto_thread()
+    return jsonify({"message": "Auto-trader stopped.", "auto_trader": set_auto_running(False)})
+
+
+@app.post("/api/auto/tick")
+def auto_tick():
+    return jsonify({"auto_trader": auto_trade_tick()})
+
+
 @app.post("/api/reset")
 def reset():
+    stop_auto_thread()
     state = deepcopy(DEFAULT_STATE)
     save_state(state)
     return jsonify({"message": "Community edition state reset", "settings": public_settings(state["settings"])})
 
 
 if __name__ == "__main__":
+    # Never resume trading silently after a restart; the user presses Start again.
+    set_auto_running(False)
     app.run(
         host=os.getenv("FLASK_HOST", "127.0.0.1"),
         port=int(os.getenv("FLASK_PORT", "5001")),

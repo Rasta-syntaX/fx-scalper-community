@@ -138,6 +138,13 @@ EVENT_TITLES = {
     "LIVE_OPEN": ("🚀", "Live trade submitted"),
     "LIVE_ERROR": ("⚠️", "Live trade failed"),
     "REBALANCE_CLOSE": ("🔁", "Position closed by rebalance"),
+    "AUTO_START": ("▶️", "Auto-trader started"),
+    "AUTO_STOP": ("⏹️", "Auto-trader stopped"),
+    "AUTO_OPEN": ("🤖", "Auto-trader opened a trade"),
+    "AUTO_CLOSE": ("🤖", "Auto-trader closed a paper trade"),
+    "LIVE_SETTLED": ("🏁", "Live contract settled"),
+    "AUTO_HALT": ("🛑", "Auto-trader halted for the day"),
+    "AUTO_ERROR": ("⚠️", "Auto-trader error"),
 }
 
 

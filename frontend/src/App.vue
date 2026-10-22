@@ -58,6 +58,12 @@ const bootstrapData = ref({
 })
 
 const settingsForm = reactive({
+  trade_direction: 'both',
+  daily_profit_target: 0,
+  daily_loss_limit: 0,
+  auto_scan_interval_seconds: 300,
+  auto_hold_minutes: 25,
+  auto_paper_exposure: 100,
   paper_trading_enabled: true,
   live_trading_enabled: false,
   broker_provider: 'deriv',
@@ -104,6 +110,18 @@ const market = computed(() => bootstrapData.value.market || [])
 const signals = computed(() => bootstrapData.value.signals || [])
 const portfolio = computed(() => bootstrapData.value.portfolio || [])
 const tradeHistory = computed(() => bootstrapData.value.trade_history || [])
+const autoTrader = computed(() => bootstrapData.value.auto_trader || {})
+
+async function startAuto(mode) {
+  if (mode === 'live' && !window.confirm('Start LIVE auto-trading? Real trades will be placed on your broker account.')) {
+    return
+  }
+  await runAction(() => api.post('auto/start', { mode }), `Auto-trader started (${mode}).`)
+}
+
+async function stopAuto() {
+  await runAction(() => api.post('auto/stop'), 'Auto-trader stopped.')
+}
 
 async function exportJournal() {
   try {
@@ -221,6 +239,12 @@ function syncFromBootstrap() {
   settingsForm.deriv_options_account_mode = settings.deriv_options_account_mode || 'demo'
   settingsForm.deriv_options_account_id = settings.deriv_options_account_id || ''
   settingsForm.risk_profile = settings.risk_profile || 'balanced'
+  settingsForm.trade_direction = settings.trade_direction || 'both'
+  settingsForm.daily_profit_target = Number(settings.daily_profit_target || 0)
+  settingsForm.daily_loss_limit = Number(settings.daily_loss_limit || 0)
+  settingsForm.auto_scan_interval_seconds = Number(settings.auto_scan_interval_seconds || 300)
+  settingsForm.auto_hold_minutes = Number(settings.auto_hold_minutes || 25)
+  settingsForm.auto_paper_exposure = Number(settings.auto_paper_exposure || 100)
   settingsForm.max_open_positions = Number(settings.max_open_positions || 6)
   settingsForm.live_trade_stake = Number(settings.live_trade_stake || 1)
   settingsForm.live_trade_currency = settings.live_trade_currency || 'USD'
@@ -338,6 +362,12 @@ async function saveSettings() {
         deriv_options_account_mode: settingsForm.deriv_options_account_mode,
         deriv_options_account_id: settingsForm.deriv_options_account_id,
         risk_profile: settingsForm.risk_profile,
+        trade_direction: settingsForm.trade_direction,
+        daily_profit_target: Number(settingsForm.daily_profit_target),
+        daily_loss_limit: Number(settingsForm.daily_loss_limit),
+        auto_scan_interval_seconds: Number(settingsForm.auto_scan_interval_seconds),
+        auto_hold_minutes: Number(settingsForm.auto_hold_minutes),
+        auto_paper_exposure: Number(settingsForm.auto_paper_exposure),
         max_open_positions: settingsForm.max_open_positions,
         live_trade_stake: Number(settingsForm.live_trade_stake),
         live_trade_currency: settingsForm.live_trade_currency,
@@ -510,6 +540,35 @@ onMounted(fetchBootstrap)
 
       <div class="card section-card">
         <div class="section-head">
+          <h2>Auto-Trader</h2>
+          <p>
+            Scans every {{ settingsForm.auto_scan_interval_seconds }}s and acts on signals in the allowed direction.
+            Stops opening trades for the day when a daily limit is hit. Stop is the kill switch.
+          </p>
+        </div>
+        <div class="section-body stack-list">
+          <div class="item-row">
+            <div class="item-title">
+              {{ autoTrader.running ? `Running (${autoTrader.mode})` : 'Stopped' }}
+            </div>
+            <div class="actions">
+              <button class="button" :disabled="busy || autoTrader.running" @click="startAuto('paper')">Start Paper</button>
+              <button class="button secondary" :disabled="busy || autoTrader.running" @click="startAuto('live')">Start Live</button>
+              <button class="button secondary" :disabled="busy || !autoTrader.running" @click="stopAuto">Stop</button>
+            </div>
+          </div>
+          <div class="item-row">
+            <span>Today {{ autoTrader.day || '–' }}: {{ formatCurrency(autoTrader.realized_pnl || 0) }} realized</span>
+            <span>{{ autoTrader.trades_today || 0 }} trades · {{ (autoTrader.pending_live || []).length }} live pending</span>
+          </div>
+          <div v-if="autoTrader.halted_reason" class="status-banner error">{{ autoTrader.halted_reason }}</div>
+          <div v-if="autoTrader.last_error" class="note">Last error: {{ autoTrader.last_error }}</div>
+          <div class="kv">Last tick {{ autoTrader.last_tick || 'never' }}</div>
+        </div>
+      </div>
+
+      <div class="card section-card">
+        <div class="section-head">
           <h2>Setup Checklist</h2>
           <p>{{ setupStatus.recommended_next_step || 'Review the configuration before trading.' }}</p>
         </div>
@@ -626,6 +685,34 @@ onMounted(fetchBootstrap)
               <div class="field">
                 <label>Max Open Positions</label>
                 <input v-model.number="settingsForm.max_open_positions" class="input" type="number" min="1" max="20" />
+              </div>
+              <div class="field">
+                <label>Trade Direction</label>
+                <select v-model="settingsForm.trade_direction" class="select">
+                  <option value="both">Buy and sell</option>
+                  <option value="buy">Buy only</option>
+                  <option value="sell">Sell only</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Daily Profit Target (0 = off)</label>
+                <input v-model.number="settingsForm.daily_profit_target" class="input" type="number" min="0" step="0.01" />
+              </div>
+              <div class="field">
+                <label>Daily Loss Limit (0 = off)</label>
+                <input v-model.number="settingsForm.daily_loss_limit" class="input" type="number" min="0" step="0.01" />
+              </div>
+              <div class="field">
+                <label>Auto Scan Every (seconds)</label>
+                <input v-model.number="settingsForm.auto_scan_interval_seconds" class="input" type="number" min="30" max="3600" />
+              </div>
+              <div class="field">
+                <label>Auto Paper Hold (minutes)</label>
+                <input v-model.number="settingsForm.auto_hold_minutes" class="input" type="number" min="1" max="1440" />
+              </div>
+              <div class="field">
+                <label>Auto Paper Exposure</label>
+                <input v-model.number="settingsForm.auto_paper_exposure" class="input" type="number" min="1" />
               </div>
               <div class="field">
                 <label>Rebalance Tolerance %</label>
