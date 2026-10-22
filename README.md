@@ -165,6 +165,27 @@ This bot can place real trades, so treat the API like a wallet:
 
 ---
 
+## 📉 Backtesting
+
+**Run Backtests** (or `POST /api/backtests/run`) replays the same rule engine used by live scans over
+real candles from your market source, for every configured symbol:
+
+- At each bar the engine only sees the trailing 100 candles, so there is no look-ahead.
+- A BUY/SELL signal enters at the **next** bar's open and exits at the close `horizon_bars` later
+  (default 5), like a fixed-duration contract. Positions never overlap.
+- Reports trades, win rate, total/average move, max drawdown and recent trades per symbol.
+
+```bash
+curl -X POST localhost:5001/api/backtests/run -H 'Content-Type: application/json' \
+  -d '{"horizon_bars": 5, "candle_count": 2000}'
+```
+
+Results are raw price moves: broker payouts and spreads are not modelled, so the win rate means
+"direction was right", not "this would have been profitable". For a contract paying `p` on a win,
+break-even is a win rate of `1 / (1 + p)`. The three fixed rule self-checks still run alongside.
+
+---
+
 ## 🔔 Webhook Alerts
 
 Get trade notifications sent to Discord or Telegram:
@@ -243,7 +264,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 - Improve the web UI
 - Write tests
 - Add more notification channels (Slack, email)
-- Backtesting engine
+- Model broker payouts and spreads in the backtester
 - Better error recovery
 
 ---

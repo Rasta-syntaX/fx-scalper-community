@@ -122,6 +122,12 @@ const rules = computed(() => bootstrapData.value.rules || [])
 const rebalancePlan = computed(() => bootstrapData.value.rebalance_plan || { actions: [] })
 const symbols = computed(() => bootstrapData.value.symbols || [])
 const lastBacktest = computed(() => bootstrapData.value.last_backtest)
+const candleBacktest = computed(() => lastBacktest.value?.candle_backtest || null)
+const backtestOptions = ref({ horizon_bars: 5, candle_count: 1000 })
+
+function formatRate(value) {
+  return value === null || value === undefined ? '–' : `${(value * 100).toFixed(1)}%`
+}
 const lastBrokerStatus = computed(() => bootstrapData.value.last_broker_status || null)
 const setupStatus = computed(() => bootstrapData.value.setup || {})
 const lastScan = computed(() => bootstrapData.value.last_scan || null)
@@ -157,6 +163,9 @@ const marketMap = computed(() => {
 const portfolioExposureLabel = computed(() => formatCurrency(stats.value.total_exposure || 0))
 const rebalanceDriftLabel = computed(() => formatPercent(rebalancePlan.value.drift_score || 0))
 const passRateLabel = computed(() => {
+  if (candleBacktest.value?.trades) {
+    return `${formatRate(candleBacktest.value.win_rate)} of ${candleBacktest.value.trades}`
+  }
   if (!lastBacktest.value?.scenario_total) {
     return 'Not run'
   }
@@ -436,7 +445,7 @@ async function applyRebalance() {
 }
 
 async function runBacktests() {
-  await runAction(() => api.post('backtests/run'), 'Backtests completed.')
+  await runAction(() => api.post('backtests/run', backtestOptions.value), 'Backtests completed.')
 }
 
 async function resetDemo() {
@@ -1059,7 +1068,14 @@ onMounted(fetchBootstrap)
         <article class="card section-card">
           <div class="section-head">
             <h2>Backtests</h2>
-            <p>Simple scenario checks verify signal and rebalance behavior after configuration changes.</p>
+            <p>
+              Walk-forward replay of the live rules over real candles: enter at the next open, exit after a fixed
+              number of bars. Price moves only; payouts and spreads are not modelled.
+            </p>
+            <div class="item-row">
+              <label>Exit after (bars) <input v-model.number="backtestOptions.horizon_bars" type="number" min="1" max="100" /></label>
+              <label>Candles <input v-model.number="backtestOptions.candle_count" type="number" min="150" max="5000" /></label>
+            </div>
           </div>
           <div class="section-body">
             <div v-if="lastBacktest" class="stack-list">
@@ -1068,14 +1084,39 @@ onMounted(fetchBootstrap)
                   <div class="item-title">Last Run</div>
                   <div class="kv">{{ lastBacktest.run_at }}</div>
                 </div>
+                <div v-if="candleBacktest" class="item-row">
+                  <div class="item-title">Candle Backtest</div>
+                  <div class="kv">
+                    {{ candleBacktest.trades || 0 }} trades · win {{ formatRate(candleBacktest.win_rate) }} ·
+                    {{ candleBacktest.source }} {{ candleBacktest.granularity }}s
+                  </div>
+                </div>
                 <div class="item-row">
-                  <div class="item-title">Scenarios</div>
+                  <div class="item-title">Rule Self-checks</div>
                   <div class="kv">{{ lastBacktest.scenario_passes }} / {{ lastBacktest.scenario_total }}</div>
                 </div>
                 <div class="item-row">
                   <div class="item-title">Rebalance Check</div>
                   <div class="kv">{{ lastBacktest.rebalance_check?.action_count || 0 }} actions</div>
                 </div>
+              </div>
+
+              <div v-for="row in candleBacktest?.results || []" :key="`bt-${row.symbol}`" class="item-card">
+                <div class="item-row">
+                  <div class="item-title">{{ row.symbol }}</div>
+                  <div class="kv">{{ row.trades }} trades · win {{ formatRate(row.win_rate) }}</div>
+                </div>
+                <div class="item-row">
+                  <span class="muted">Total {{ row.total_return_pct }}% · max DD {{ row.max_drawdown_pct }}%</span>
+                  <span class="muted">{{ row.bars_evaluated }} bars over {{ row.candles }} candles</span>
+                </div>
+              </div>
+              <div v-for="error in candleBacktest?.errors || []" :key="`bterr-${error.symbol}`" class="item-card">
+                <div class="item-row">
+                  <div class="item-title">{{ error.symbol }}</div>
+                  <span class="signal-pill sell">ERROR</span>
+                </div>
+                <div class="note">{{ error.error }}</div>
               </div>
 
               <div v-for="result in lastBacktest.scenario_results" :key="result.name" class="item-card">

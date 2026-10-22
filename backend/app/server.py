@@ -27,6 +27,7 @@ from app.market_data import (
 )
 from app.journal import append_entry, export_csv
 from app.notifications import notify_event
+from app.backtest import clamp_int, run_backtest
 from app.snapshot import build_market_snapshots
 
 app = Flask(__name__)
@@ -722,7 +723,57 @@ def build_rebalance_plan(state: dict) -> dict:
     }
 
 
-def backtest_summary(state: dict) -> dict:
+def candle_backtest(settings: dict, options: dict) -> dict:
+    """Replay the rule engine over real candles for every configured symbol."""
+    symbols = normalize_symbols(settings.get("symbols", []))
+    granularity = settings.get("market_granularity", DEFAULT_GRANULARITY)
+    horizon = clamp_int(options.get("horizon_bars"), 5, 1, 100)
+    count = clamp_int(options.get("candle_count"), 1000, 150, 5000)
+    window = clamp_int(options.get("window"), 100, 50, 1000)
+    report = {
+        "source": str(settings.get("market_source") or "deriv"),
+        "granularity": granularity,
+        "horizon_bars": horizon,
+        "requested_candles": count,
+        "results": [],
+        "errors": [],
+    }
+    if not symbols:
+        report["errors"].append({"symbol": "-", "error": "No symbols configured. Add symbols before backtesting."})
+        return report
+    try:
+        provider = provider_from_settings(settings)
+    except MarketDataError as exc:
+        report["errors"].append({"symbol": "-", "error": str(exc)})
+        return report
+    report["source"] = provider.name
+    for entry in symbols:
+        symbol = entry["symbol"]
+        try:
+            candles = provider.get_candles(symbol, granularity=granularity, count=count)
+            report["results"].append(
+                run_backtest(
+                    symbol,
+                    entry["asset_class"],
+                    candles,
+                    settings,
+                    evaluate_snapshot,
+                    horizon=horizon,
+                    window=window,
+                    direction=settings.get("trade_direction", "both"),
+                )
+            )
+        except MarketDataError as exc:
+            report["errors"].append({"symbol": symbol, "error": str(exc)})
+        except Exception as exc:
+            report["errors"].append({"symbol": symbol, "error": f"{type(exc).__name__}: {exc}"})
+    trades = sum(row["trades"] for row in report["results"])
+    wins = sum(row["wins"] for row in report["results"])
+    report.update({"trades": trades, "wins": wins, "win_rate": round(wins / trades, 4) if trades else None})
+    return report
+
+
+def backtest_summary(state: dict, options: Optional[dict] = None) -> dict:
     settings = state.get("settings", {})
     scenarios = [
         {
@@ -798,6 +849,7 @@ def backtest_summary(state: dict) -> dict:
         "scenario_passes": passes,
         "scenario_total": len(scenarios),
         "scenario_results": results,
+        "candle_backtest": candle_backtest(settings, options or {}),
         "rebalance_check": {
             "passed": True,
             "drift_score": rebalance["drift_score"],
@@ -1300,7 +1352,7 @@ def journal_export():
 @app.post("/api/backtests/run")
 def backtests_run():
     state = load_state()
-    state["last_backtest"] = backtest_summary(state)
+    state["last_backtest"] = backtest_summary(state, json_payload())
     save_state(state)
     return jsonify({"message": "Backtests completed", "summary": state["last_backtest"]})
 
