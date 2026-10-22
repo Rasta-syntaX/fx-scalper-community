@@ -5,7 +5,6 @@ Used by the trading engine to broadcast trade events. Both channels
 can run simultaneously; configure via environment variables.
 """
 import os
-import json
 import requests
 from datetime import datetime
 

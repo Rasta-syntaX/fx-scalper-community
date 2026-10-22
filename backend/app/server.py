@@ -18,6 +18,13 @@ from app.deriv_service import (
     DerivCommunityClient,
     DerivServiceError,
 )
+from app.market_data import (
+    DEFAULT_GRANULARITY,
+    MarketDataError,
+    provider_from_settings,
+    validate_granularity,
+)
+from app.snapshot import build_market_snapshots
 
 app = Flask(__name__)
 CORS(app)
@@ -89,8 +96,10 @@ RULES = [
         "purpose": "Allow paper trade entries only when structure, momentum, and price position agree.",
         "inputs": ["ema_fast", "ema_slow", "adx", "rsi", "price_vs_vwap"],
         "conditions": [
-            "BUY when EMA fast > EMA slow, ADX is above threshold, RSI is inside the bullish band, and price is above VWAP.",
-            "SELL when EMA fast < EMA slow, ADX is above threshold, RSI is inside the bearish band, and price is below VWAP.",
+            "BUY when EMA fast > EMA slow, ADX is above threshold, RSI is inside the "
+            "bullish band, and price is above VWAP.",
+            "SELL when EMA fast < EMA slow, ADX is above threshold, RSI is inside the "
+            "bearish band, and price is below VWAP.",
         ],
         "outputs": ["paper_signal"],
     },
@@ -142,11 +151,16 @@ DEFAULT_STATE = {
         "target_allocations": dict(DEFAULT_TARGET_ALLOCATIONS),
         "symbols": [],
         "market_snapshots": [],
+        "market_source": "deriv",
+        "market_replay_file": "",
+        "market_granularity": 300,
+        "market_candle_count": 200,
     },
     "portfolio": [],
     "trade_history": [],
     "last_backtest": None,
     "last_broker_status": None,
+    "last_scan": None,
 }
 
 
@@ -271,8 +285,16 @@ def normalize_market_snapshots(snapshots: object, symbol_map: dict[str, dict]) -
                 "adx": float(item.get("adx") or 0.0),
                 "rsi": float(item.get("rsi") or 50.0),
                 "atr_ratio": float(item.get("atr_ratio") or 1.0),
-                "price_vs_vwap": "below" if str(item.get("price_vs_vwap") or "above").strip().lower() == "below" else "above",
-                "candle_quality": "stretched" if str(item.get("candle_quality") or "clean").strip().lower() == "stretched" else "clean",
+                "price_vs_vwap": (
+                    "below"
+                    if str(item.get("price_vs_vwap") or "above").strip().lower() == "below"
+                    else "above"
+                ),
+                "candle_quality": (
+                    "stretched"
+                    if str(item.get("candle_quality") or "clean").strip().lower() == "stretched"
+                    else "clean"
+                ),
                 "distance_to_band": float(item.get("distance_to_band") or 0.0),
             }
         )
@@ -360,6 +382,7 @@ def sanitize_state(state: object) -> dict:
     clean_state["trade_history"] = sanitize_trade_history(raw.get("trade_history", []), symbol_map)
     clean_state["last_backtest"] = raw.get("last_backtest")
     clean_state["last_broker_status"] = raw.get("last_broker_status")
+    clean_state["last_scan"] = raw.get("last_scan")
     return clean_state
 
 
@@ -457,7 +480,10 @@ def record_broker_status(state: dict, status: dict) -> dict:
 def classify_regime(snapshot: dict, thresholds: dict[str, float]) -> str:
     if float(snapshot.get("atr_ratio") or 0.0) < 0.85:
         return "LOW_VOLATILITY"
-    if float(snapshot.get("adx") or 0.0) >= thresholds["adx"] and abs(float(snapshot.get("ema_fast") or 0.0) - float(snapshot.get("ema_slow") or 0.0)) > 0:
+    if (
+        float(snapshot.get("adx") or 0.0) >= thresholds["adx"]
+        and abs(float(snapshot.get("ema_fast") or 0.0) - float(snapshot.get("ema_slow") or 0.0)) > 0
+    ):
         return "TRENDING"
     return "RANGING"
 
@@ -473,10 +499,20 @@ def evaluate_snapshot(snapshot: dict, settings: dict) -> dict:
     below_vwap = snapshot.get("price_vs_vwap") == "below"
     stretched = snapshot.get("candle_quality") != "clean" or float(snapshot.get("distance_to_band") or 0.0) > 0.88
     if regime == "TRENDING" and not stretched:
-        if float(snapshot.get("ema_fast") or 0.0) > float(snapshot.get("ema_slow") or 0.0) and adx >= thresholds["adx"] and thresholds["rsi_buy_min"] <= rsi <= thresholds["rsi_buy_max"] and above_vwap:
+        if (
+            float(snapshot.get("ema_fast") or 0.0) > float(snapshot.get("ema_slow") or 0.0)
+            and adx >= thresholds["adx"]
+            and thresholds["rsi_buy_min"] <= rsi <= thresholds["rsi_buy_max"]
+            and above_vwap
+        ):
             decision = "BUY"
             reason = "Trend structure, momentum, and price positioning are aligned."
-        elif float(snapshot.get("ema_fast") or 0.0) < float(snapshot.get("ema_slow") or 0.0) and adx >= thresholds["adx"] and thresholds["rsi_sell_min"] <= rsi <= thresholds["rsi_sell_max"] and below_vwap:
+        elif (
+            float(snapshot.get("ema_fast") or 0.0) < float(snapshot.get("ema_slow") or 0.0)
+            and adx >= thresholds["adx"]
+            and thresholds["rsi_sell_min"] <= rsi <= thresholds["rsi_sell_max"]
+            and below_vwap
+        ):
             decision = "SELL"
             reason = "Downtrend structure, momentum, and price positioning are aligned."
     elif regime == "LOW_VOLATILITY":
@@ -488,6 +524,53 @@ def evaluate_snapshot(snapshot: dict, settings: dict) -> dict:
 
 def market_view(settings: dict) -> list[dict]:
     return [evaluate_snapshot(dict(row), settings) for row in configured_market_snapshots(settings)]
+
+
+def run_market_scan(state: dict) -> dict:
+    """Fetch candles, rebuild the market snapshots and record what happened.
+
+    This is what turns the engine from "evaluate whatever was pasted in" into
+    something that reads the market by itself. Snapshots that come back are
+    normalized through the same path as a manual paste, so the stored contract
+    is identical either way.
+    """
+    settings = state.get("settings", {})
+    symbols = normalize_symbols(settings.get("symbols", []))
+    granularity = settings.get("market_granularity", DEFAULT_GRANULARITY)
+    count = int(settings.get("market_candle_count", 200) or 200)
+    report = {
+        "at": utc_now_iso(),
+        "source": str(settings.get("market_source") or "deriv"),
+        "granularity": granularity,
+        "configured_symbols": len(symbols),
+        "scanned": 0,
+        "errors": [],
+    }
+    if not symbols:
+        report["errors"] = [{"symbol": "-", "error": "No symbols configured. Add symbols before scanning."}]
+        state["last_scan"] = report
+        return report
+    try:
+        provider = provider_from_settings(settings)
+    except MarketDataError as exc:
+        report["errors"] = [{"symbol": "-", "error": str(exc)}]
+        state["last_scan"] = report
+        return report
+    result = build_market_snapshots(
+        symbols, settings, provider, granularity=granularity, count=count
+    )
+    report["source"] = provider.name
+    report["scanned"] = len(result.snapshots)
+    report["errors"] = result.errors
+    if result.snapshots:
+        state["settings"]["market_snapshots"] = normalize_market_snapshots(
+            result.snapshots, symbol_map_from_settings(settings)
+        )
+        market = market_view(state["settings"])
+        report["signal_count"] = count_open_signals(market)
+        report["regimes"] = sorted({row["regime"] for row in market})
+    state["last_scan"] = report
+    return report
 
 
 def refresh_portfolio_prices(positions: list[dict], settings: dict) -> list[dict]:
@@ -529,7 +612,10 @@ def build_rebalance_plan(state: dict) -> dict:
     targets = normalize_target_allocations(settings.get("target_allocations"), key_mode)
     tolerance = max(0.0, min(float(settings.get("rebalance_tolerance", 0.08) or 0.08), 0.50))
     total_exposure, current_weights = summarize_positions(positions, key_mode)
-    drift_score = sum(abs(current_weights.get(key, 0.0) - targets.get(key, 0.0)) for key in set(current_weights) | set(targets))
+    drift_score = sum(
+        abs(current_weights.get(key, 0.0) - targets.get(key, 0.0))
+        for key in set(current_weights) | set(targets)
+    )
     actions: list[RebalanceAction] = []
     if total_exposure > 0:
         for key in sorted(set(current_weights) | set(targets)):
@@ -537,7 +623,16 @@ def build_rebalance_plan(state: dict) -> dict:
             target = targets.get(key, 0.0)
             drift = current - target
             if drift > tolerance:
-                matching = [pos for pos in positions if str(pos.get("asset_class") if key_mode == "asset_class" else pos.get("symbol") or "UNKNOWN").upper() == key]
+                matching = [
+                    pos
+                    for pos in positions
+                    if str(
+                        pos.get("asset_class")
+                        if key_mode == "asset_class"
+                        else pos.get("symbol") or "UNKNOWN"
+                    ).upper()
+                    == key
+                ]
                 matching.sort(key=lambda item: float(item.get("exposure") or 0.0), reverse=True)
                 if matching:
                     position = matching[0]
@@ -545,7 +640,10 @@ def build_rebalance_plan(state: dict) -> dict:
                         RebalanceAction(
                             action="CLOSE_POSITION",
                             allocation_key=key,
-                            reason=f"{key} is overweight by {drift:.2%}; reduce exposure until drift is within tolerance.",
+                            reason=(
+                                f"{key} is overweight by {drift:.2%}; "
+                                "reduce exposure until drift is within tolerance."
+                            ),
                             current_weight=current,
                             target_weight=target,
                             drift=drift,
@@ -558,7 +656,10 @@ def build_rebalance_plan(state: dict) -> dict:
                     RebalanceAction(
                         action="PRIORITIZE_NEW_ENTRIES",
                         allocation_key=key,
-                        reason=f"{key} is underweight by {(target - current):.2%}; prioritize new paper trades in this bucket.",
+                        reason=(
+                            f"{key} is underweight by {(target - current):.2%}; "
+                            "prioritize new paper trades in this bucket."
+                        ),
                         current_weight=current,
                         target_weight=target,
                         drift=target - current,
@@ -637,7 +738,15 @@ def backtest_summary(state: dict) -> dict:
         outcome = evaluate_snapshot(scenario["snapshot"], settings)
         passed = outcome["decision"] == scenario["expected"]
         passes += int(passed)
-        results.append({"name": scenario["name"], "expected": scenario["expected"], "actual": outcome["decision"], "passed": passed, "reason": outcome["reason"]})
+        results.append(
+            {
+                "name": scenario["name"],
+                "expected": scenario["expected"],
+                "actual": outcome["decision"],
+                "passed": passed,
+                "reason": outcome["reason"],
+            }
+        )
     rebalance = build_rebalance_plan(state)
     return {
         "run_at": utc_now_iso(),
@@ -695,6 +804,7 @@ def bootstrap_payload(state: dict) -> dict:
         "rebalance_plan": build_rebalance_plan(state),
         "last_backtest": state.get("last_backtest"),
         "last_broker_status": state.get("last_broker_status"),
+        "last_scan": state.get("last_scan"),
         "symbols": normalize_symbols(settings.get("symbols", [])),
         "setup": setup_status(settings, market),
         "stats": {
@@ -709,39 +819,92 @@ def bootstrap_payload(state: dict) -> dict:
 
 def normalize_settings(payload: dict, current: dict) -> dict:
     merged = {**current, **runtime_setting_overrides()}
-    merged["paper_trading_enabled"] = bool(payload.get("paper_trading_enabled", current.get("paper_trading_enabled", True)))
-    merged["live_trading_enabled"] = bool(payload.get("live_trading_enabled", current.get("live_trading_enabled", False)))
+    merged["paper_trading_enabled"] = bool(
+        payload.get("paper_trading_enabled", current.get("paper_trading_enabled", True))
+    )
+    merged["live_trading_enabled"] = bool(
+        payload.get("live_trading_enabled", current.get("live_trading_enabled", False))
+    )
     merged["broker_provider"] = "deriv"
     merged["deriv_app_id"] = str(payload_value(payload, "deriv_app_id", current, merged, "") or "").strip()
     merged["deriv_token"] = str(payload_value(payload, "deriv_token", current, merged, "") or "").strip()
-    merged["deriv_api_url"] = str(payload_value(payload, "deriv_api_url", current, merged, DEFAULT_DERIV_API_URL) or DEFAULT_DERIV_API_URL).strip()
-    merged["deriv_ws_url"] = str(payload_value(payload, "deriv_ws_url", current, merged, DEFAULT_DERIV_WS_URL) or DEFAULT_DERIV_WS_URL).strip()
+    merged["deriv_api_url"] = str(
+        payload_value(payload, "deriv_api_url", current, merged, DEFAULT_DERIV_API_URL)
+        or DEFAULT_DERIV_API_URL
+    ).strip()
+    merged["deriv_ws_url"] = str(
+        payload_value(payload, "deriv_ws_url", current, merged, DEFAULT_DERIV_WS_URL)
+        or DEFAULT_DERIV_WS_URL
+    ).strip()
     account_mode = str(payload_value(payload, "deriv_options_account_mode", current, merged, "demo")).strip().lower()
     merged["deriv_options_account_mode"] = account_mode if account_mode in {"demo", "real"} else "demo"
-    merged["deriv_options_account_id"] = str(payload_value(payload, "deriv_options_account_id", current, merged, "") or "").strip()
+    merged["deriv_options_account_id"] = str(
+        payload_value(payload, "deriv_options_account_id", current, merged, "") or ""
+    ).strip()
     risk = str(payload.get("risk_profile", current.get("risk_profile", "balanced"))).strip().lower()
     merged["risk_profile"] = risk if risk in {"conservative", "balanced", "aggressive"} else "balanced"
     try:
-        merged["max_open_positions"] = max(1, min(int(payload.get("max_open_positions", current.get("max_open_positions", 6))), 20))
+        merged["max_open_positions"] = max(
+            1,
+            min(int(payload.get("max_open_positions", current.get("max_open_positions", 6))), 20),
+        )
     except Exception:
         merged["max_open_positions"] = current.get("max_open_positions", 6)
-    merged["live_trade_stake"] = sanitize_live_amount(payload.get("live_trade_stake", current.get("live_trade_stake", 1.0)), current.get("live_trade_stake", 1.0))
-    merged["live_trade_currency"] = sanitize_currency(payload.get("live_trade_currency", current.get("live_trade_currency", "USD")), "USD")
-    merged["live_trade_duration"] = sanitize_duration(payload.get("live_trade_duration", current.get("live_trade_duration", 5)), current.get("live_trade_duration", 5))
-    merged["live_trade_duration_unit"] = sanitize_duration_unit(payload.get("live_trade_duration_unit", current.get("live_trade_duration_unit", "t")), current.get("live_trade_duration_unit", "t"))
+    merged["live_trade_stake"] = sanitize_live_amount(
+        payload.get("live_trade_stake", current.get("live_trade_stake", 1.0)),
+        current.get("live_trade_stake", 1.0),
+    )
+    merged["live_trade_currency"] = sanitize_currency(
+        payload.get("live_trade_currency", current.get("live_trade_currency", "USD")),
+        "USD",
+    )
+    merged["live_trade_duration"] = sanitize_duration(
+        payload.get("live_trade_duration", current.get("live_trade_duration", 5)),
+        current.get("live_trade_duration", 5),
+    )
+    merged["live_trade_duration_unit"] = sanitize_duration_unit(
+        payload.get("live_trade_duration_unit", current.get("live_trade_duration_unit", "t")),
+        current.get("live_trade_duration_unit", "t"),
+    )
     merged["rebalance_enabled"] = bool(payload.get("rebalance_enabled", current.get("rebalance_enabled", True)))
-    merged["rebalance_key_mode"] = normalize_key_mode(payload.get("rebalance_key_mode", current.get("rebalance_key_mode", "asset_class")))
+    merged["rebalance_key_mode"] = normalize_key_mode(
+        payload.get("rebalance_key_mode", current.get("rebalance_key_mode", "asset_class"))
+    )
     try:
         tolerance = float(payload.get("rebalance_tolerance", current.get("rebalance_tolerance", 0.08)))
     except Exception:
         tolerance = current.get("rebalance_tolerance", 0.08)
     merged["rebalance_tolerance"] = max(0.0, min(tolerance, 0.50))
+    source = str(payload.get("market_source", current.get("market_source", "deriv")) or "deriv").strip().lower()
+    merged["market_source"] = source if source in {"deriv", "replay"} else "deriv"
+    merged["market_replay_file"] = str(
+        payload.get("market_replay_file", current.get("market_replay_file", "")) or ""
+    ).strip()
+    try:
+        merged["market_granularity"] = validate_granularity(
+            payload.get("market_granularity", current.get("market_granularity", DEFAULT_GRANULARITY))
+        )
+    except MarketDataError:
+        merged["market_granularity"] = current.get("market_granularity", DEFAULT_GRANULARITY)
+    try:
+        merged["market_candle_count"] = max(
+            60,
+            min(
+                int(payload.get("market_candle_count", current.get("market_candle_count", 200))),
+                5000,
+            ),
+        )
+    except Exception:
+        merged["market_candle_count"] = current.get("market_candle_count", 200)
     merged["symbols"] = normalize_symbols(payload.get("symbols", current.get("symbols", [])))
     merged["market_snapshots"] = normalize_market_snapshots(
         payload.get("market_snapshots", current.get("market_snapshots", [])),
         symbol_map_from_settings(merged),
     )
-    merged["target_allocations"] = normalize_target_allocations(payload.get("target_allocations", current.get("target_allocations", DEFAULT_TARGET_ALLOCATIONS)), merged["rebalance_key_mode"])
+    merged["target_allocations"] = normalize_target_allocations(
+        payload.get("target_allocations", current.get("target_allocations", DEFAULT_TARGET_ALLOCATIONS)),
+        merged["rebalance_key_mode"],
+    )
     return merged
 
 
@@ -758,6 +921,37 @@ def bootstrap():
 @app.get("/api/rules")
 def rules():
     return jsonify({"rules": RULES})
+
+
+@app.post("/api/scan")
+def market_scan():
+    state = load_state()
+    report = run_market_scan(state)
+    save_state(state)
+    settings = state.get("settings", {})
+    market = market_view(settings)
+    signals = [row for row in market if row["decision"] != "HOLD"]
+    scanned = int(report.get("scanned") or 0)
+    return (
+        jsonify(
+            {
+                "ok": bool(scanned),
+                "message": (
+                    f"Scanned {scanned} symbol(s) from {report.get('source')}."
+                    if scanned
+                    else "Scan produced no snapshots. Check last_scan.errors for detail."
+                ),
+                "scan": report,
+                "market": market,
+                "signals": signals,
+                "stats": {
+                    "market_count": len(market),
+                    "signal_count": len(signals),
+                },
+            }
+        ),
+        200 if scanned else 400,
+    )
 
 
 @app.post("/api/config")
@@ -895,13 +1089,22 @@ def live_trade_open():
     symbol_map = symbol_map_from_settings(settings)
     if symbol not in symbol_map:
         return error_response("Unknown symbol. Add it in settings before placing a live trade.", 400)
-    amount = sanitize_live_amount(payload.get("amount", settings.get("live_trade_stake", 1.0)), settings.get("live_trade_stake", 1.0))
-    duration = sanitize_duration(payload.get("duration", settings.get("live_trade_duration", 5)), settings.get("live_trade_duration", 5))
+    amount = sanitize_live_amount(
+        payload.get("amount", settings.get("live_trade_stake", 1.0)),
+        settings.get("live_trade_stake", 1.0),
+    )
+    duration = sanitize_duration(
+        payload.get("duration", settings.get("live_trade_duration", 5)),
+        settings.get("live_trade_duration", 5),
+    )
     duration_unit = sanitize_duration_unit(
         payload.get("duration_unit", settings.get("live_trade_duration_unit", "t")),
         settings.get("live_trade_duration_unit", "t"),
     )
-    currency = sanitize_currency(payload.get("currency", settings.get("live_trade_currency", "USD")), settings.get("live_trade_currency", "USD"))
+    currency = sanitize_currency(
+        payload.get("currency", settings.get("live_trade_currency", "USD")),
+        settings.get("live_trade_currency", "USD"),
+    )
     contract_type = sanitize_live_contract_type(payload.get("contract_type"), side)
     client = deriv_client_from_settings(settings)
     try:
