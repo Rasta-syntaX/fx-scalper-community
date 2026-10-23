@@ -56,7 +56,10 @@ def run_backtest(
     horizon: int = 5,
     window: int = 100,
     direction: str = "both",
+    payout: Optional[float] = None,
 ) -> Dict[str, object]:
+    """Walk-forward test. With ``payout`` (e.g. 0.85) each trade is also scored as a fixed-stake
+    contract: +payout per $1 on a win, -1 on a loss."""
     settings = settings or {}
     config = IndicatorSettings.from_settings(settings)
     candles = contiguous_tail(candles)
@@ -103,7 +106,7 @@ def run_backtest(
 
     returns = [trade["return_pct"] for trade in trades]
     wins = sum(1 for value in returns if value > 0)
-    return {
+    report = {
         "symbol": symbol,
         "asset_class": asset_class,
         "candles": len(candles),
@@ -124,4 +127,32 @@ def run_backtest(
         "best_pct": max(returns) if returns else None,
         "worst_pct": min(returns) if returns else None,
         "recent_trades": trades[-MAX_TRADES_RETURNED:],
+        "equity_curve": equity_curve(returns),
     }
+    if payout:
+        stake = [payout if value > 0 else -1.0 for value in returns]
+        report.update(
+            {
+                "payout": round(payout, 4),
+                "break_even_win_rate": round(1.0 / (1.0 + payout), 4),
+                "net_per_stake": round(sum(stake), 4),
+                "expectancy_per_stake": round(sum(stake) / len(stake), 4) if stake else None,
+                "max_drawdown_stake": round(_max_drawdown(stake), 4),
+            }
+        )
+    return report
+
+
+def equity_curve(returns: Sequence[float], points: int = 200) -> List[float]:
+    """Cumulative return after each trade, thinned to at most ``points`` values for charts."""
+    curve, total = [], 0.0
+    for value in returns:
+        total += value
+        curve.append(round(total, 4))
+    step = -(-len(curve) // points) if curve else 1
+    if step <= 1:
+        return curve
+    thinned = curve[step - 1::step]
+    if thinned[-1] != curve[-1]:
+        thinned.append(curve[-1])
+    return thinned

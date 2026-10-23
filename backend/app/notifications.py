@@ -145,6 +145,7 @@ EVENT_TITLES = {
     "LIVE_SETTLED": ("🏁", "Live contract settled"),
     "AUTO_HALT": ("🛑", "Auto-trader halted for the day"),
     "AUTO_ERROR": ("⚠️", "Auto-trader error"),
+    "DAILY_SUMMARY": ("📅", "Auto-trader daily summary"),
 }
 
 
