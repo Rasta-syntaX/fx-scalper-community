@@ -180,9 +180,24 @@ curl -X POST localhost:5001/api/backtests/run -H 'Content-Type: application/json
   -d '{"horizon_bars": 5, "candle_count": 2000}'
 ```
 
-Results are raw price moves: broker payouts and spreads are not modelled, so the win rate means
-"direction was right", not "this would have been profitable". For a contract paying `p` on a win,
-break-even is a win rate of `1 / (1 + p)`. The three fixed rule self-checks still run alongside.
+Results are raw price moves, so the win rate means "direction was right", not "this would have
+been profitable". Set **Payout %** (or `"payout_pct": 85`) to also score every trade as a $1
+fixed-stake contract (+0.85 on a win, -1 on a loss). You then get `net_per_stake`,
+`expectancy_per_stake`, `max_drawdown_stake` and `break_even_win_rate` (`1 / (1 + p)`, about 54% at 85%).
+Spreads and slippage are still not modelled. Each result has an `equity_curve`, drawn as a chart
+on the dashboard. The three fixed rule self-checks still run alongside.
+
+### Backtest from the command line
+
+No UI needed, handy for trying strategy changes:
+
+```bash
+cd backend
+python -m app.cli backtest --replay data/replay_sample.json --symbol frxEURUSD --payout 85
+python -m app.cli backtest --symbol frxEURUSD --symbol frxGBPUSD --horizon 3 --json   # live Deriv candles
+```
+
+Options: `--horizon`, `--window`, `--candles`, `--granularity`, `--direction both|buy|sell`, `--json`.
 
 ---
 
@@ -204,7 +219,27 @@ every `auto_scan_interval_seconds` (default 300):
 - **Brokers:** live orders go through `backend/app/brokers.py`. Deriv is the first adapter; add
   another by subclassing `LiveBroker` and registering it in `LIVE_BROKERS`.
 
-Every start, stop, open, close, settlement, halt and error lands in the journal and the alerts.
+### Risk guards
+
+All are off at 0 and reset at UTC midnight unless noted.
+
+| Setting | Effect |
+|---|---|
+| `max_trades_per_day` | Halts for the day after this many auto trades. |
+| `max_loss_streak` | Halts for the day after this many losing trades in a row. |
+| `loss_cooldown_minutes` | Pauses new entries for this long after any loss (carries over midnight). |
+| `trading_hours_start` / `trading_hours_end` | Only opens trades in this UTC hour window, e.g. `7`–`16` for London/NY overlap. `22`–`6` wraps past midnight; equal values mean all day. |
+
+A *halt* stops new entries until the next UTC day; a *pause* (cooldown, outside hours) lifts by
+itself. Open positions are still managed and closed either way.
+
+### Performance and daily summary
+
+The card shows win rate and P&L per symbol plus an equity curve over the last 200 closed auto
+trades (paper and live). At the first tick of each new UTC day the loop posts a
+**daily summary** (trades, wins/losses, realized P&L) to the journal and to Discord/Telegram.
+
+Every start, stop, open, close, settlement, halt, error and daily summary lands in the journal and the alerts.
 
 ---
 
@@ -281,13 +316,8 @@ through the real rule engine and the real Flask API.
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-**Ideas for contributions:**
-- Add new indicators or trading strategies
-- Improve the web UI
-- Write tests
-- Add more notification channels (Slack, email)
-- Model broker payouts and spreads in the backtester
-- Better error recovery
+- **Add your broker:** [docs/ADDING_A_BROKER.md](docs/ADDING_A_BROKER.md) walks through a live-broker adapter.
+- **Pick something up:** [ROADMAP.md](ROADMAP.md) lists good first issues and bigger projects.
 
 ---
 

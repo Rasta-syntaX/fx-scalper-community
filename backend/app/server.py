@@ -27,11 +27,14 @@ from app.market_data import (
     validate_granularity,
 )
 from app.autotrader import (
+    blocking_reason,
+    day_summary,
     default_auto_state,
     due_positions,
-    limit_breached,
     paper_pnl,
+    performance,
     pick_entries,
+    record_close,
     roll_day,
     utcnow,
 )
@@ -759,11 +762,16 @@ def candle_backtest(settings: dict, options: dict) -> dict:
     horizon = clamp_int(options.get("horizon_bars"), 5, 1, 100)
     count = clamp_int(options.get("candle_count"), 1000, 150, 5000)
     window = clamp_int(options.get("window"), 100, 50, 1000)
+    try:
+        payout = max(0.0, min(500.0, float(options.get("payout_pct") or 0))) / 100.0
+    except (TypeError, ValueError):
+        payout = 0.0
     report = {
         "source": str(settings.get("market_source") or "deriv"),
         "granularity": granularity,
         "horizon_bars": horizon,
         "requested_candles": count,
+        "payout_pct": round(payout * 100, 2),
         "results": [],
         "errors": [],
     }
@@ -790,6 +798,7 @@ def candle_backtest(settings: dict, options: dict) -> dict:
                     horizon=horizon,
                     window=window,
                     direction=settings.get("trade_direction", "both"),
+                    payout=payout or None,
                 )
             )
         except MarketDataError as exc:
@@ -943,6 +952,7 @@ def bootstrap_payload(state: dict) -> dict:
         "last_broker_status": state.get("last_broker_status"),
         "last_scan": state.get("last_scan"),
         "auto_trader": state.get("auto_trader") or default_auto_state(),
+        "auto_performance": performance((state.get("auto_trader") or {}).get("closed_trades") or []),
         "symbols": normalize_symbols(settings.get("symbols", [])),
         "setup": setup_status(settings, market),
         "stats": {
@@ -961,6 +971,11 @@ AUTO_NUMBER_SETTINGS = (
     ("auto_scan_interval_seconds", 300, 30, 3600),
     ("auto_hold_minutes", 25, 1, 1440),
     ("auto_paper_exposure", 100.0, 1.0, 1e9),
+    ("max_trades_per_day", 0, 0, 1000),
+    ("max_loss_streak", 0, 0, 100),
+    ("loss_cooldown_minutes", 0, 0, 1440),
+    ("trading_hours_start", 0, 0, 23),
+    ("trading_hours_end", 0, 0, 24),
 )
 
 
@@ -1431,7 +1446,7 @@ def auto_event(
     )
 
 
-def settle_live_trades(state: dict, auto: dict, broker) -> None:
+def settle_live_trades(state: dict, auto: dict, broker, now) -> None:
     still_pending = []
     for item in auto["pending_live"]:
         try:
@@ -1443,7 +1458,10 @@ def settle_live_trades(state: dict, auto: dict, broker) -> None:
         if not status.get("settled"):
             still_pending.append(item)
             continue
-        auto["realized_pnl"] = round(float(auto["realized_pnl"]) + float(status["profit"]), 2)
+        record_close(
+            auto, state["settings"], symbol=item["symbol"], side=item["side"],
+            pnl=status["profit"], now=now, mode="live",
+        )
         auto_event(
             state, "LIVE_SETTLED", item["symbol"], item["side"], item["stake"],
             f"Contract {item['ref']} settled {float(status['profit']):+.2f}.",
@@ -1458,7 +1476,9 @@ def close_due_paper_positions(state: dict, auto: dict, now) -> None:
         price = float(prices.get(position["symbol"]) or position["current_price"])
         pnl = paper_pnl(position, price)
         state["portfolio"] = [row for row in state["portfolio"] if row["id"] != position["id"]]
-        auto["realized_pnl"] = round(float(auto["realized_pnl"]) + pnl, 2)
+        record_close(
+            auto, settings, symbol=position["symbol"], side=position["side"], pnl=pnl, now=now, mode="paper"
+        )
         auto_event(
             state, "AUTO_CLOSE", position["symbol"], position["side"], position["exposure"],
             f"Closed at {price} after the hold time. P&L {pnl:+.2f}.",
@@ -1484,7 +1504,7 @@ def open_paper_auto_trade(state: dict, signal: dict) -> tuple:
     return exposure, f"Auto paper {signal['decision']} at {price}: {signal.get('reason', '')}"
 
 
-def open_auto_trades(state: dict, auto: dict, broker) -> None:
+def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
     settings = state["settings"]
     if auto["mode"] == "paper" and not settings.get("paper_trading_enabled", True):
         return
@@ -1508,7 +1528,7 @@ def open_auto_trades(state: dict, auto: dict, broker) -> None:
             exposure, note = open_paper_auto_trade(state, signal)
         auto["trades_today"] = int(auto["trades_today"]) + 1
         auto_event(state, "AUTO_OPEN", symbol, side, exposure, note)
-        if limit_breached(auto, settings):
+        if blocking_reason(auto, settings, now)[0]:
             break
 
 
@@ -1517,25 +1537,30 @@ def auto_trade_tick(now=None) -> dict:
     now = now or utcnow()
     with AUTO_LOCK:
         state = load_state()
-        auto = roll_day(state["auto_trader"], now)
+        auto = state["auto_trader"]
         if not auto["running"]:
             return auto
+        summary = day_summary(auto, now)
+        roll_day(auto, now)
+        if summary:
+            auto_event(state, "DAILY_SUMMARY", note=summary)
         broker = None
         try:
             if auto["mode"] == "live":
                 broker = live_broker_from_settings(state["settings"])
-                settle_live_trades(state, auto, broker)
+                settle_live_trades(state, auto, broker, now)
             report = run_market_scan(state)
             if report.get("errors") and not report.get("scanned"):
                 auto["last_error"] = report["errors"][0]["error"]
             close_due_paper_positions(state, auto, now)
-            reason = limit_breached(auto, state["settings"])
-            if reason:
+            reason, halt = blocking_reason(auto, state["settings"], now)
+            auto["paused_reason"] = "" if halt else reason
+            if halt:
                 if not auto["halted_reason"]:
                     auto_event(state, "AUTO_HALT", note=reason)
                 auto["halted_reason"] = reason
-            else:
-                open_auto_trades(state, auto, broker)
+            elif not reason:
+                open_auto_trades(state, auto, broker, now)
         except BrokerError as exc:
             auto["last_error"] = str(exc)
         finally:
