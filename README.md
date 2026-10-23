@@ -151,6 +151,63 @@ window is still warming up.
 
 ---
 
+## 🔒 Security
+
+This bot can place real trades, so treat the API like a wallet:
+
+- The saved Deriv token is **write-only**: `/api/bootstrap` and `/api/config` return
+  `deriv_token: ""` plus `deriv_token_set` / `deriv_token_mode`. Leave the field blank to keep the
+  saved token, or press **Forget saved token** to clear it.
+- Set `COMMUNITY_API_KEY` to require an `X-API-Key` header on every `/api/*` route except
+  `/api/health`. Do this whenever the backend is reachable from anything other than your own machine.
+- CORS only allows the local dashboard origins by default. Set `COMMUNITY_CORS_ORIGINS` if you host
+  the frontend elsewhere.
+
+---
+
+## 📉 Backtesting
+
+**Run Backtests** (or `POST /api/backtests/run`) replays the same rule engine used by live scans over
+real candles from your market source, for every configured symbol:
+
+- At each bar the engine only sees the trailing 100 candles, so there is no look-ahead.
+- A BUY/SELL signal enters at the **next** bar's open and exits at the close `horizon_bars` later
+  (default 5), like a fixed-duration contract. Positions never overlap.
+- Reports trades, win rate, total/average move, max drawdown and recent trades per symbol.
+
+```bash
+curl -X POST localhost:5001/api/backtests/run -H 'Content-Type: application/json' \
+  -d '{"horizon_bars": 5, "candle_count": 2000}'
+```
+
+Results are raw price moves: broker payouts and spreads are not modelled, so the win rate means
+"direction was right", not "this would have been profitable". For a contract paying `p` on a win,
+break-even is a win rate of `1 / (1 + p)`. The three fixed rule self-checks still run alongside.
+
+---
+
+## 🤖 Auto-Trader
+
+The **Auto-Trader** card (or `POST /api/auto/start` with `{"mode": "paper"}`) runs a background loop
+every `auto_scan_interval_seconds` (default 300):
+
+1. Settles pending live contracts and adds their profit/loss to today's realized P&L.
+2. Scans the market, then closes auto-opened paper positions after `auto_hold_minutes`.
+3. Stops opening trades for the rest of the UTC day once `daily_profit_target` or `daily_loss_limit`
+   is hit (0 = off). Unsettled live stakes count as at risk toward the loss limit.
+4. Opens one trade per new BUY/SELL signal allowed by `trade_direction` (`both`, `buy`, `sell`),
+   up to `max_open_positions`.
+
+- **Paper first:** live mode needs **Live trading enabled** in settings and an extra confirmation.
+- **Kill switch:** **Stop** (`POST /api/auto/stop`) halts the loop immediately. Restarting the
+  server never resumes trading on its own.
+- **Brokers:** live orders go through `backend/app/brokers.py`. Deriv is the first adapter; add
+  another by subclassing `LiveBroker` and registering it in `LIVE_BROKERS`.
+
+Every start, stop, open, close, settlement, halt and error lands in the journal and the alerts.
+
+---
+
 ## 🔔 Webhook Alerts
 
 Get trade notifications sent to Discord or Telegram:
@@ -229,7 +286,7 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 - Improve the web UI
 - Write tests
 - Add more notification channels (Slack, email)
-- Backtesting engine
+- Model broker payouts and spreads in the backtester
 - Better error recovery
 
 ---

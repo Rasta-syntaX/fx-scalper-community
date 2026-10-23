@@ -13,6 +13,30 @@ const api = axios.create({
   baseURL: apiBaseUrl,
 })
 
+const API_KEY_STORAGE = 'fx-scalper-community-api-key'
+
+api.interceptors.request.use((config) => {
+  const key = window.localStorage.getItem(API_KEY_STORAGE)
+  if (key) {
+    config.headers['X-API-Key'] = key
+  }
+  return config
+})
+
+api.interceptors.response.use(undefined, (error) => {
+  const config = error?.config
+  if (error?.response?.status !== 401 || !config || config._apiKeyRetried) {
+    return Promise.reject(error)
+  }
+  const key = window.prompt('This backend requires an API key (COMMUNITY_API_KEY). Enter it:')
+  if (!key) {
+    return Promise.reject(error)
+  }
+  window.localStorage.setItem(API_KEY_STORAGE, key.trim())
+  config._apiKeyRetried = true
+  return api.request(config)
+})
+
 const loading = ref(true)
 const busy = ref(false)
 const errorMessage = ref('')
@@ -34,6 +58,12 @@ const bootstrapData = ref({
 })
 
 const settingsForm = reactive({
+  trade_direction: 'both',
+  daily_profit_target: 0,
+  daily_loss_limit: 0,
+  auto_scan_interval_seconds: 300,
+  auto_hold_minutes: 25,
+  auto_paper_exposure: 100,
   paper_trading_enabled: true,
   live_trading_enabled: false,
   broker_provider: 'deriv',
@@ -80,6 +110,18 @@ const market = computed(() => bootstrapData.value.market || [])
 const signals = computed(() => bootstrapData.value.signals || [])
 const portfolio = computed(() => bootstrapData.value.portfolio || [])
 const tradeHistory = computed(() => bootstrapData.value.trade_history || [])
+const autoTrader = computed(() => bootstrapData.value.auto_trader || {})
+
+async function startAuto(mode) {
+  if (mode === 'live' && !window.confirm('Start LIVE auto-trading? Real trades will be placed on your broker account.')) {
+    return
+  }
+  await runAction(() => api.post('auto/start', { mode }), `Auto-trader started (${mode}).`)
+}
+
+async function stopAuto() {
+  await runAction(() => api.post('auto/stop'), 'Auto-trader stopped.')
+}
 
 async function exportJournal() {
   try {
@@ -98,6 +140,12 @@ const rules = computed(() => bootstrapData.value.rules || [])
 const rebalancePlan = computed(() => bootstrapData.value.rebalance_plan || { actions: [] })
 const symbols = computed(() => bootstrapData.value.symbols || [])
 const lastBacktest = computed(() => bootstrapData.value.last_backtest)
+const candleBacktest = computed(() => lastBacktest.value?.candle_backtest || null)
+const backtestOptions = ref({ horizon_bars: 5, candle_count: 1000 })
+
+function formatRate(value) {
+  return value === null || value === undefined ? '–' : `${(value * 100).toFixed(1)}%`
+}
 const lastBrokerStatus = computed(() => bootstrapData.value.last_broker_status || null)
 const setupStatus = computed(() => bootstrapData.value.setup || {})
 const lastScan = computed(() => bootstrapData.value.last_scan || null)
@@ -118,8 +166,13 @@ const brokerTokenLabel = computed(() => {
   if (lastBrokerStatus.value?.token_mode === 'legacy') {
     return 'Legacy'
   }
-  return settingsForm.deriv_token?.startsWith('pat_') ? 'PAT' : 'Legacy'
+  if (settingsForm.deriv_token) {
+    return settingsForm.deriv_token.startsWith('pat_') ? 'PAT' : 'Legacy'
+  }
+  return bootstrapData.value.settings?.deriv_token_mode === 'pat' ? 'PAT' : 'Legacy'
 })
+
+const derivTokenSaved = computed(() => Boolean(bootstrapData.value.settings?.deriv_token_set))
 
 const marketMap = computed(() => {
   return Object.fromEntries(market.value.map((row) => [row.symbol, row]))
@@ -128,6 +181,9 @@ const marketMap = computed(() => {
 const portfolioExposureLabel = computed(() => formatCurrency(stats.value.total_exposure || 0))
 const rebalanceDriftLabel = computed(() => formatPercent(rebalancePlan.value.drift_score || 0))
 const passRateLabel = computed(() => {
+  if (candleBacktest.value?.trades) {
+    return `${formatRate(candleBacktest.value.win_rate)} of ${candleBacktest.value.trades}`
+  }
   if (!lastBacktest.value?.scenario_total) {
     return 'Not run'
   }
@@ -183,6 +239,12 @@ function syncFromBootstrap() {
   settingsForm.deriv_options_account_mode = settings.deriv_options_account_mode || 'demo'
   settingsForm.deriv_options_account_id = settings.deriv_options_account_id || ''
   settingsForm.risk_profile = settings.risk_profile || 'balanced'
+  settingsForm.trade_direction = settings.trade_direction || 'both'
+  settingsForm.daily_profit_target = Number(settings.daily_profit_target || 0)
+  settingsForm.daily_loss_limit = Number(settings.daily_loss_limit || 0)
+  settingsForm.auto_scan_interval_seconds = Number(settings.auto_scan_interval_seconds || 300)
+  settingsForm.auto_hold_minutes = Number(settings.auto_hold_minutes || 25)
+  settingsForm.auto_paper_exposure = Number(settings.auto_paper_exposure || 100)
   settingsForm.max_open_positions = Number(settings.max_open_positions || 6)
   settingsForm.live_trade_stake = Number(settings.live_trade_stake || 1)
   settingsForm.live_trade_currency = settings.live_trade_currency || 'USD'
@@ -254,6 +316,10 @@ async function runAction(action, successText) {
   }
 }
 
+async function forgetDerivToken() {
+  await runAction(() => api.post('config', { clear_deriv_token: true }), 'Saved Deriv token removed.')
+}
+
 async function saveSettings() {
   let targetAllocations = {}
   let configuredSymbols = []
@@ -296,6 +362,12 @@ async function saveSettings() {
         deriv_options_account_mode: settingsForm.deriv_options_account_mode,
         deriv_options_account_id: settingsForm.deriv_options_account_id,
         risk_profile: settingsForm.risk_profile,
+        trade_direction: settingsForm.trade_direction,
+        daily_profit_target: Number(settingsForm.daily_profit_target),
+        daily_loss_limit: Number(settingsForm.daily_loss_limit),
+        auto_scan_interval_seconds: Number(settingsForm.auto_scan_interval_seconds),
+        auto_hold_minutes: Number(settingsForm.auto_hold_minutes),
+        auto_paper_exposure: Number(settingsForm.auto_paper_exposure),
         max_open_positions: settingsForm.max_open_positions,
         live_trade_stake: Number(settingsForm.live_trade_stake),
         live_trade_currency: settingsForm.live_trade_currency,
@@ -403,7 +475,7 @@ async function applyRebalance() {
 }
 
 async function runBacktests() {
-  await runAction(() => api.post('backtests/run'), 'Backtests completed.')
+  await runAction(() => api.post('backtests/run', backtestOptions.value), 'Backtests completed.')
 }
 
 async function resetDemo() {
@@ -464,6 +536,35 @@ onMounted(fetchBootstrap)
           Apply Rebalance
         </button>
         <button class="button secondary" :disabled="busy" @click="resetDemo">Reset Demo</button>
+      </div>
+
+      <div class="card section-card">
+        <div class="section-head">
+          <h2>Auto-Trader</h2>
+          <p>
+            Scans every {{ settingsForm.auto_scan_interval_seconds }}s and acts on signals in the allowed direction.
+            Stops opening trades for the day when a daily limit is hit. Stop is the kill switch.
+          </p>
+        </div>
+        <div class="section-body stack-list">
+          <div class="item-row">
+            <div class="item-title">
+              {{ autoTrader.running ? `Running (${autoTrader.mode})` : 'Stopped' }}
+            </div>
+            <div class="actions">
+              <button class="button" :disabled="busy || autoTrader.running" @click="startAuto('paper')">Start Paper</button>
+              <button class="button secondary" :disabled="busy || autoTrader.running" @click="startAuto('live')">Start Live</button>
+              <button class="button secondary" :disabled="busy || !autoTrader.running" @click="stopAuto">Stop</button>
+            </div>
+          </div>
+          <div class="item-row">
+            <span>Today {{ autoTrader.day || '–' }}: {{ formatCurrency(autoTrader.realized_pnl || 0) }} realized</span>
+            <span>{{ autoTrader.trades_today || 0 }} trades · {{ (autoTrader.pending_live || []).length }} live pending</span>
+          </div>
+          <div v-if="autoTrader.halted_reason" class="status-banner error">{{ autoTrader.halted_reason }}</div>
+          <div v-if="autoTrader.last_error" class="note">Last error: {{ autoTrader.last_error }}</div>
+          <div class="kv">Last tick {{ autoTrader.last_tick || 'never' }}</div>
+        </div>
       </div>
 
       <div class="card section-card">
@@ -529,7 +630,22 @@ onMounted(fetchBootstrap)
               </div>
               <div class="field">
                 <label>Deriv API Token</label>
-                <input v-model="settingsForm.deriv_token" class="input" type="password" placeholder="Paste your Deriv token" />
+                <input
+                  v-model="settingsForm.deriv_token"
+                  class="input"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="derivTokenSaved ? 'Saved — leave blank to keep it' : 'Paste your Deriv token'"
+                />
+                <button
+                  v-if="derivTokenSaved"
+                  class="button secondary"
+                  type="button"
+                  :disabled="busy"
+                  @click="forgetDerivToken"
+                >
+                  Forget saved token
+                </button>
               </div>
               <div class="field">
                 <label>Deriv REST URL</label>
@@ -569,6 +685,34 @@ onMounted(fetchBootstrap)
               <div class="field">
                 <label>Max Open Positions</label>
                 <input v-model.number="settingsForm.max_open_positions" class="input" type="number" min="1" max="20" />
+              </div>
+              <div class="field">
+                <label>Trade Direction</label>
+                <select v-model="settingsForm.trade_direction" class="select">
+                  <option value="both">Buy and sell</option>
+                  <option value="buy">Buy only</option>
+                  <option value="sell">Sell only</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Daily Profit Target (0 = off)</label>
+                <input v-model.number="settingsForm.daily_profit_target" class="input" type="number" min="0" step="0.01" />
+              </div>
+              <div class="field">
+                <label>Daily Loss Limit (0 = off)</label>
+                <input v-model.number="settingsForm.daily_loss_limit" class="input" type="number" min="0" step="0.01" />
+              </div>
+              <div class="field">
+                <label>Auto Scan Every (seconds)</label>
+                <input v-model.number="settingsForm.auto_scan_interval_seconds" class="input" type="number" min="30" max="3600" />
+              </div>
+              <div class="field">
+                <label>Auto Paper Hold (minutes)</label>
+                <input v-model.number="settingsForm.auto_hold_minutes" class="input" type="number" min="1" max="1440" />
+              </div>
+              <div class="field">
+                <label>Auto Paper Exposure</label>
+                <input v-model.number="settingsForm.auto_paper_exposure" class="input" type="number" min="1" />
               </div>
               <div class="field">
                 <label>Rebalance Tolerance %</label>
@@ -1011,7 +1155,14 @@ onMounted(fetchBootstrap)
         <article class="card section-card">
           <div class="section-head">
             <h2>Backtests</h2>
-            <p>Simple scenario checks verify signal and rebalance behavior after configuration changes.</p>
+            <p>
+              Walk-forward replay of the live rules over real candles: enter at the next open, exit after a fixed
+              number of bars. Price moves only; payouts and spreads are not modelled.
+            </p>
+            <div class="item-row">
+              <label>Exit after (bars) <input v-model.number="backtestOptions.horizon_bars" type="number" min="1" max="100" /></label>
+              <label>Candles <input v-model.number="backtestOptions.candle_count" type="number" min="150" max="5000" /></label>
+            </div>
           </div>
           <div class="section-body">
             <div v-if="lastBacktest" class="stack-list">
@@ -1020,14 +1171,39 @@ onMounted(fetchBootstrap)
                   <div class="item-title">Last Run</div>
                   <div class="kv">{{ lastBacktest.run_at }}</div>
                 </div>
+                <div v-if="candleBacktest" class="item-row">
+                  <div class="item-title">Candle Backtest</div>
+                  <div class="kv">
+                    {{ candleBacktest.trades || 0 }} trades · win {{ formatRate(candleBacktest.win_rate) }} ·
+                    {{ candleBacktest.source }} {{ candleBacktest.granularity }}s
+                  </div>
+                </div>
                 <div class="item-row">
-                  <div class="item-title">Scenarios</div>
+                  <div class="item-title">Rule Self-checks</div>
                   <div class="kv">{{ lastBacktest.scenario_passes }} / {{ lastBacktest.scenario_total }}</div>
                 </div>
                 <div class="item-row">
                   <div class="item-title">Rebalance Check</div>
                   <div class="kv">{{ lastBacktest.rebalance_check?.action_count || 0 }} actions</div>
                 </div>
+              </div>
+
+              <div v-for="row in candleBacktest?.results || []" :key="`bt-${row.symbol}`" class="item-card">
+                <div class="item-row">
+                  <div class="item-title">{{ row.symbol }}</div>
+                  <div class="kv">{{ row.trades }} trades · win {{ formatRate(row.win_rate) }}</div>
+                </div>
+                <div class="item-row">
+                  <span class="muted">Total {{ row.total_return_pct }}% · max DD {{ row.max_drawdown_pct }}%</span>
+                  <span class="muted">{{ row.bars_evaluated }} bars over {{ row.candles }} candles</span>
+                </div>
+              </div>
+              <div v-for="error in candleBacktest?.errors || []" :key="`bterr-${error.symbol}`" class="item-card">
+                <div class="item-row">
+                  <div class="item-title">{{ error.symbol }}</div>
+                  <span class="signal-pill sell">ERROR</span>
+                </div>
+                <div class="note">{{ error.error }}</div>
               </div>
 
               <div v-for="result in lastBacktest.scenario_results" :key="result.name" class="item-card">
