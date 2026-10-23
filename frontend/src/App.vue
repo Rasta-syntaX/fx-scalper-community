@@ -64,6 +64,11 @@ const settingsForm = reactive({
   auto_scan_interval_seconds: 300,
   auto_hold_minutes: 25,
   auto_paper_exposure: 100,
+  max_trades_per_day: 0,
+  max_loss_streak: 0,
+  loss_cooldown_minutes: 0,
+  trading_hours_start: 0,
+  trading_hours_end: 0,
   paper_trading_enabled: true,
   live_trading_enabled: false,
   broker_provider: 'deriv',
@@ -111,6 +116,25 @@ const signals = computed(() => bootstrapData.value.signals || [])
 const portfolio = computed(() => bootstrapData.value.portfolio || [])
 const tradeHistory = computed(() => bootstrapData.value.trade_history || [])
 const autoTrader = computed(() => bootstrapData.value.auto_trader || {})
+const autoPerformance = computed(() => bootstrapData.value.auto_performance || {})
+
+function sparkScale(points, height) {
+  const low = Math.min(0, ...points)
+  const span = Math.max(0, ...points) - low || 1
+  return (value) => height - ((value - low) / span) * height
+}
+
+function sparkPath(points, width = 240, height = 48) {
+  if (!points || points.length < 2) return ''
+  const y = sparkScale(points, height)
+  return points
+    .map((value, index) => `${index ? 'L' : 'M'}${((index / (points.length - 1)) * width).toFixed(1)},${y(value).toFixed(1)}`)
+    .join(' ')
+}
+
+function zeroLine(points, height = 48) {
+  return points && points.length ? sparkScale(points, height)(0).toFixed(1) : height
+}
 
 async function startAuto(mode) {
   if (mode === 'live' && !window.confirm('Start LIVE auto-trading? Real trades will be placed on your broker account.')) {
@@ -141,7 +165,7 @@ const rebalancePlan = computed(() => bootstrapData.value.rebalance_plan || { act
 const symbols = computed(() => bootstrapData.value.symbols || [])
 const lastBacktest = computed(() => bootstrapData.value.last_backtest)
 const candleBacktest = computed(() => lastBacktest.value?.candle_backtest || null)
-const backtestOptions = ref({ horizon_bars: 5, candle_count: 1000 })
+const backtestOptions = ref({ horizon_bars: 5, candle_count: 1000, payout_pct: 0 })
 
 function formatRate(value) {
   return value === null || value === undefined ? '–' : `${(value * 100).toFixed(1)}%`
@@ -245,6 +269,11 @@ function syncFromBootstrap() {
   settingsForm.auto_scan_interval_seconds = Number(settings.auto_scan_interval_seconds || 300)
   settingsForm.auto_hold_minutes = Number(settings.auto_hold_minutes || 25)
   settingsForm.auto_paper_exposure = Number(settings.auto_paper_exposure || 100)
+  settingsForm.max_trades_per_day = Number(settings.max_trades_per_day || 0)
+  settingsForm.max_loss_streak = Number(settings.max_loss_streak || 0)
+  settingsForm.loss_cooldown_minutes = Number(settings.loss_cooldown_minutes || 0)
+  settingsForm.trading_hours_start = Number(settings.trading_hours_start || 0)
+  settingsForm.trading_hours_end = Number(settings.trading_hours_end || 0)
   settingsForm.max_open_positions = Number(settings.max_open_positions || 6)
   settingsForm.live_trade_stake = Number(settings.live_trade_stake || 1)
   settingsForm.live_trade_currency = settings.live_trade_currency || 'USD'
@@ -368,6 +397,11 @@ async function saveSettings() {
         auto_scan_interval_seconds: Number(settingsForm.auto_scan_interval_seconds),
         auto_hold_minutes: Number(settingsForm.auto_hold_minutes),
         auto_paper_exposure: Number(settingsForm.auto_paper_exposure),
+        max_trades_per_day: Number(settingsForm.max_trades_per_day),
+        max_loss_streak: Number(settingsForm.max_loss_streak),
+        loss_cooldown_minutes: Number(settingsForm.loss_cooldown_minutes),
+        trading_hours_start: Number(settingsForm.trading_hours_start),
+        trading_hours_end: Number(settingsForm.trading_hours_end),
         max_open_positions: settingsForm.max_open_positions,
         live_trade_stake: Number(settingsForm.live_trade_stake),
         live_trade_currency: settingsForm.live_trade_currency,
@@ -563,7 +597,22 @@ onMounted(fetchBootstrap)
           </div>
           <div v-if="autoTrader.halted_reason" class="status-banner error">{{ autoTrader.halted_reason }}</div>
           <div v-if="autoTrader.last_error" class="note">Last error: {{ autoTrader.last_error }}</div>
-          <div class="kv">Last tick {{ autoTrader.last_tick || 'never' }}</div>
+          <div v-if="autoTrader.paused_reason" class="note">Paused: {{ autoTrader.paused_reason }}</div>
+          <div class="kv">Last tick {{ autoTrader.last_tick || 'never' }} · loss streak {{ autoTrader.loss_streak || 0 }}</div>
+          <div v-if="autoPerformance.trades" class="item-card">
+            <div class="item-row">
+              <div class="item-title">Performance (last {{ autoPerformance.trades }} closed trades)</div>
+              <div class="kv">win {{ formatRate(autoPerformance.win_rate) }} · {{ formatCurrency(autoPerformance.pnl) }}</div>
+            </div>
+            <svg v-if="(autoPerformance.equity_curve || []).length > 1" viewBox="0 0 240 48" preserveAspectRatio="none" style="width: 100%; height: 48px" role="img" :aria-label="'Auto-trader equity curve'">
+              <line x1="0" x2="240" :y1="zeroLine(autoPerformance.equity_curve)" :y2="zeroLine(autoPerformance.equity_curve)" stroke="currentColor" stroke-opacity="0.25" stroke-dasharray="4 4" />
+              <path :d="sparkPath(autoPerformance.equity_curve)" fill="none" :stroke="(autoPerformance.equity_curve)[(autoPerformance.equity_curve).length - 1] >= 0 ? '#22c55e' : '#ef4444'" stroke-width="2" vector-effect="non-scaling-stroke" />
+            </svg>
+            <div v-for="row in autoPerformance.by_symbol" :key="`perf-${row.symbol}`" class="item-row">
+              <span>{{ row.symbol }}</span>
+              <span class="muted">{{ row.trades }} trades · win {{ formatRate(row.win_rate) }} · {{ formatCurrency(row.pnl) }}</span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -713,6 +762,26 @@ onMounted(fetchBootstrap)
               <div class="field">
                 <label>Auto Paper Exposure</label>
                 <input v-model.number="settingsForm.auto_paper_exposure" class="input" type="number" min="1" />
+              </div>
+              <div class="field">
+                <label>Max Trades Per Day (0 = off)</label>
+                <input v-model.number="settingsForm.max_trades_per_day" class="input" type="number" min="0" max="1000" />
+              </div>
+              <div class="field">
+                <label>Halt After Losses In A Row (0 = off)</label>
+                <input v-model.number="settingsForm.max_loss_streak" class="input" type="number" min="0" max="100" />
+              </div>
+              <div class="field">
+                <label>Cooldown After A Loss (minutes)</label>
+                <input v-model.number="settingsForm.loss_cooldown_minutes" class="input" type="number" min="0" max="1440" />
+              </div>
+              <div class="field">
+                <label>Trade From (UTC hour)</label>
+                <input v-model.number="settingsForm.trading_hours_start" class="input" type="number" min="0" max="23" />
+              </div>
+              <div class="field">
+                <label>Trade Until (UTC hour, same = all day)</label>
+                <input v-model.number="settingsForm.trading_hours_end" class="input" type="number" min="0" max="24" />
               </div>
               <div class="field">
                 <label>Rebalance Tolerance %</label>
@@ -1162,6 +1231,7 @@ onMounted(fetchBootstrap)
             <div class="item-row">
               <label>Exit after (bars) <input v-model.number="backtestOptions.horizon_bars" type="number" min="1" max="100" /></label>
               <label>Candles <input v-model.number="backtestOptions.candle_count" type="number" min="150" max="5000" /></label>
+              <label>Payout % (0 = off) <input v-model.number="backtestOptions.payout_pct" type="number" min="0" max="500" /></label>
             </div>
           </div>
           <div class="section-body">
@@ -1197,6 +1267,14 @@ onMounted(fetchBootstrap)
                   <span class="muted">Total {{ row.total_return_pct }}% · max DD {{ row.max_drawdown_pct }}%</span>
                   <span class="muted">{{ row.bars_evaluated }} bars over {{ row.candles }} candles</span>
                 </div>
+                <div v-if="row.payout" class="item-row">
+                  <span class="muted">At {{ Math.round(row.payout * 100) }}% payout: {{ row.net_per_stake >= 0 ? '+' : '' }}{{ row.net_per_stake }} per $1 staked</span>
+                  <span class="muted">break-even win rate {{ formatRate(row.break_even_win_rate) }}</span>
+                </div>
+                <svg v-if="(row.equity_curve || []).length > 1" viewBox="0 0 240 48" preserveAspectRatio="none" style="width: 100%; height: 48px" role="img" :aria-label="`${row.symbol} equity curve`">
+                  <line x1="0" x2="240" :y1="zeroLine(row.equity_curve)" :y2="zeroLine(row.equity_curve)" stroke="currentColor" stroke-opacity="0.25" stroke-dasharray="4 4" />
+                  <path :d="sparkPath(row.equity_curve)" fill="none" :stroke="(row.equity_curve)[(row.equity_curve).length - 1] >= 0 ? '#22c55e' : '#ef4444'" stroke-width="2" vector-effect="non-scaling-stroke" />
+                </svg>
               </div>
               <div v-for="error in candleBacktest?.errors || []" :key="`bterr-${error.symbol}`" class="item-card">
                 <div class="item-row">

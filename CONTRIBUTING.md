@@ -76,4 +76,6 @@ Check the [issues labeled "good first issue"](https://github.com/Rasta-syntaX/fx
 
 ---
 
+Adding a broker? Follow [docs/ADDING_A_BROKER.md](docs/ADDING_A_BROKER.md). Looking for something to do? See [ROADMAP.md](ROADMAP.md).
+
 **One rule**: Keep it open source friendly. No proprietary SaaS features (MT5, multi-user, scalper mode) belong here.
