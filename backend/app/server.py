@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 from uuid import uuid4
 
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from app.deriv_service import (
@@ -24,6 +24,8 @@ from app.market_data import (
     provider_from_settings,
     validate_granularity,
 )
+from app.journal import append_entry, export_csv
+from app.notifications import notify_event
 from app.snapshot import build_market_snapshots
 
 app = Flask(__name__)
@@ -384,6 +386,14 @@ def sanitize_state(state: object) -> dict:
     clean_state["last_broker_status"] = raw.get("last_broker_status")
     clean_state["last_scan"] = raw.get("last_scan")
     return clean_state
+
+
+def record_event(state: dict, entry: dict) -> dict:
+    """Add an event to the dashboard history, the CSV journal and any alert channels."""
+    state.setdefault("trade_history", []).insert(0, entry)
+    append_entry(entry)
+    notify_event(entry)
+    return entry
 
 
 def error_response(message: str, status_code: int = 400):
@@ -1062,8 +1072,8 @@ def paper_trade_open():
         "opened_at": utc_now_iso(),
     }
     state.setdefault("portfolio", []).append(position)
-    state.setdefault("trade_history", []).insert(
-        0,
+    record_event(
+        state,
         {
             "timestamp": utc_now_iso(),
             "type": "OPEN",
@@ -1134,8 +1144,8 @@ def live_trade_open():
                 **snapshot,
             },
         )
-        state.setdefault("trade_history", []).insert(
-            0,
+        record_event(
+            state,
             {
                 "timestamp": utc_now_iso(),
                 "type": "LIVE_OPEN",
@@ -1178,8 +1188,8 @@ def live_trade_open():
                 "options_account_mode": settings.get("deriv_options_account_mode", "demo"),
             },
         )
-        state.setdefault("trade_history", []).insert(
-            0,
+        record_event(
+            state,
             {
                 "timestamp": utc_now_iso(),
                 "type": "LIVE_ERROR",
@@ -1208,8 +1218,8 @@ def paper_trade_rebalance():
         for index, position in enumerate(list(state.get("portfolio", []))):
             if str(position.get("id")) == action["position_id"]:
                 state["portfolio"].pop(index)
-                state.setdefault("trade_history", []).insert(
-                    0,
+                record_event(
+                    state,
                     {
                         "timestamp": utc_now_iso(),
                         "type": "REBALANCE_CLOSE",
@@ -1223,6 +1233,16 @@ def paper_trade_rebalance():
                 break
     save_state(state)
     return jsonify({"message": "Rebalance applied", "plan": plan, "closed_positions": closed})
+
+
+@app.get("/api/journal.csv")
+def journal_export():
+    state = load_state()
+    return Response(
+        export_csv(state.get("trade_history", [])),
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=trade_log.csv"},
+    )
 
 
 @app.post("/api/backtests/run")

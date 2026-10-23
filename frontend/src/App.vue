@@ -80,6 +80,20 @@ const market = computed(() => bootstrapData.value.market || [])
 const signals = computed(() => bootstrapData.value.signals || [])
 const portfolio = computed(() => bootstrapData.value.portfolio || [])
 const tradeHistory = computed(() => bootstrapData.value.trade_history || [])
+
+async function exportJournal() {
+  try {
+    const { data } = await api.get('journal.csv', { responseType: 'blob' })
+    const url = URL.createObjectURL(data)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'trade_log.csv'
+    link.click()
+    URL.revokeObjectURL(url)
+  } catch (error) {
+    setError(error)
+  }
+}
 const rules = computed(() => bootstrapData.value.rules || [])
 const rebalancePlan = computed(() => bootstrapData.value.rebalance_plan || { actions: [] })
 const symbols = computed(() => bootstrapData.value.symbols || [])
@@ -1055,7 +1069,8 @@ onMounted(fetchBootstrap)
         <article class="card section-card">
           <div class="section-head">
             <h2>Recent Activity</h2>
-            <p>The latest paper-trade and rebalance events stored in local JSON state.</p>
+            <p>The latest paper-trade and rebalance events. The full history is kept in the CSV journal.</p>
+            <button class="button secondary" type="button" @click="exportJournal">Export CSV</button>
           </div>
           <div class="section-body stack-list">
             <div v-for="entry in tradeHistory" :key="`${entry.timestamp}-${entry.symbol}-${entry.type}`" class="item-card">

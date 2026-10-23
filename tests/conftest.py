@@ -18,6 +18,7 @@ if BACKEND not in sys.path:
 # its data directory at import time, so this has to run before any test module
 # imports it.
 os.environ.setdefault("COMMUNITY_DATA_DIR", tempfile.mkdtemp(prefix="fx-scalper-community-tests-"))
+os.environ.setdefault("COMMUNITY_LOG_DIR", tempfile.mkdtemp(prefix="fx-scalper-community-logs-"))
 
 
 @pytest.fixture

@@ -165,7 +165,11 @@ Both can run simultaneously.
 
 ## 📊 Trade Journal
 
-The bot logs every trade to `logs/trade_log.csv`. You can also export your journal from the web dashboard.
+Every paper trade, live trade, live error and rebalance close is appended to `logs/trade_log.csv`
+(override the folder with `COMMUNITY_LOG_DIR`). Download it with **Export CSV** under Recent Activity
+or `GET /api/journal.csv`.
+
+The same events are sent to Discord/Telegram when those variables are set.
 
 ---
 
