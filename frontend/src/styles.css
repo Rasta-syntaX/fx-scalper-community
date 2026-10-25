@@ -513,10 +513,11 @@ textarea {
 }
 
 .tabs {
-  grid-column: 1 / -1;
   display: flex;
   gap: 6px;
   overflow-x: auto;
+  margin: -6px 0 12px;
+  padding: 0 4px;
 }
 
 .tab {
@@ -789,6 +790,7 @@ textarea {
 
   .tab {
     padding: 8px 6px;
+    flex: 1 1 0;
     font-size: 0.8rem;
   }
 
@@ -811,4 +813,9 @@ textarea {
   .candle-svg {
     height: 180px;
   }
+}
+
+.chart-head .select {
+  width: auto;
+  min-width: 160px;
 }

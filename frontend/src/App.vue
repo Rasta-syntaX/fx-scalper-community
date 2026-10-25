@@ -130,6 +130,10 @@ const TABS = [
 const initialTab = window.location.hash.slice(1)
 const tab = ref(TABS.some(([id]) => id === initialTab) ? initialTab : 'dashboard')
 watch(tab, (value) => window.history.replaceState(null, '', `#${value}`))
+window.addEventListener('hashchange', () => {
+  const next = window.location.hash.slice(1)
+  if (TABS.some(([id]) => id === next)) tab.value = next
+})
 
 const THEME_STORAGE = 'fx-scalper-community-theme'
 const theme = ref(localStorage.getItem(THEME_STORAGE) || 'dark')
@@ -668,21 +672,21 @@ onMounted(fetchBootstrap)
           {{ theme === 'dark' ? '☀' : '☾' }}
         </button>
       </div>
-      <nav class="tabs" role="tablist" aria-label="Sections">
-        <button
-          v-for="[id, label] in TABS"
-          :key="id"
-          class="tab"
-          :class="{ active: tab === id }"
-          role="tab"
-          type="button"
-          :aria-selected="tab === id"
-          @click="tab = id"
-        >
-          {{ label }}
-        </button>
-      </nav>
     </header>
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button
+        v-for="[id, label] in TABS"
+        :key="id"
+        class="tab"
+        :class="{ active: tab === id }"
+        role="tab"
+        type="button"
+        :aria-selected="tab === id"
+        @click="tab = id"
+      >
+        {{ label }}
+      </button>
+    </nav>
 
     <section v-show="tab === 'dashboard'" class="hero-panel">
       <div class="stats-grid">

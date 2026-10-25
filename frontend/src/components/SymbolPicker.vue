@@ -81,7 +81,8 @@ function remove(symbol) {
         <option>CRYPTO</option>
         <option>COMMODITIES</option>
         <option>INDICES</option>
-        <option>SYNTHETIC</option>
+        <option>SYNTHETICS</option>
+        <option>STOCKS</option>
       </select>
       <button class="button secondary" type="button" @click="add(draft, draftClass)">Add</button>
     </div>
