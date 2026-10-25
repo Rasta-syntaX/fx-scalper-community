@@ -1,6 +1,5 @@
 """Unit tests for the market data providers."""
 
-import json
 
 import pytest
 

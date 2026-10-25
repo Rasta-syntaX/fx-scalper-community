@@ -206,6 +206,10 @@ DEFAULT_STATE = {
         "market_source": "deriv",
         "market_replay_file": "",
         "binance_data_url": "https://data-api.binance.vision",
+        "binance_api_key": "",
+        "binance_api_secret": "",
+        "binance_testnet": True,
+        "binance_mainnet_url": "https://api.binance.com",
         "market_granularity": 300,
         "market_candle_count": 200,
         "trade_direction": "both",
@@ -915,8 +919,12 @@ def setup_status(settings: dict, market: list[dict]) -> dict:
     deriv_app_id = str(settings.get("deriv_app_id") or "").strip()
     deriv_token = str(settings.get("deriv_token") or "").strip()
     live_enabled = bool(settings.get("live_trading_enabled", False))
+    provider = settings.get("broker_provider", "deriv")
+    if provider == "binance":
+        deriv_app_id = str(settings.get("binance_api_key") or "").strip()
+        deriv_token = str(settings.get("binance_api_secret") or "").strip()
     return {
-        "broker_provider": settings.get("broker_provider", "deriv"),
+        "broker_provider": provider,
         "broker_configured": bool(deriv_app_id and deriv_token),
         "symbols_configured": bool(symbols),
         "market_snapshots_configured": bool(market),
@@ -927,7 +935,7 @@ def setup_status(settings: dict, market: list[dict]) -> dict:
             "Add symbols and market snapshots, then review settings before opening paper trades."
             if not symbols or not market
             else (
-                "Live trading is enabled. Test the Deriv connection before placing a live trade."
+                f"Live trading is enabled. Test the {provider.title()} connection before placing a live trade."
                 if live_enabled and deriv_app_id and deriv_token
                 else "Configuration looks usable for paper trading."
             )
@@ -942,6 +950,10 @@ def public_settings(settings: dict) -> dict:
         **settings,
         "deriv_token": "",
         "deriv_token_set": bool(token),
+        "binance_api_key": "",
+        "binance_api_secret": "",
+        "binance_key_set": bool(str(settings.get("binance_api_key") or "").strip()),
+        "binance_secret_set": bool(str(settings.get("binance_api_secret") or "").strip()),
         "deriv_token_mode": ("pat" if token.startswith("pat_") else "legacy") if token else None,
     }
 
@@ -1014,7 +1026,20 @@ def normalize_settings(payload: dict, current: dict) -> dict:
     merged["live_trading_enabled"] = bool(
         payload.get("live_trading_enabled", current.get("live_trading_enabled", False))
     )
-    merged["broker_provider"] = "deriv"
+    provider = str(payload.get("broker_provider", current.get("broker_provider", "deriv")) or "").strip().lower()
+    merged["broker_provider"] = provider if provider in {"deriv", "binance"} else "deriv"
+    for field in ("binance_api_key", "binance_api_secret"):
+        incoming = str(payload.get(field) or "").strip()
+        if payload.get("clear_binance_keys"):
+            merged[field] = ""
+        elif incoming:
+            merged[field] = incoming
+        else:
+            merged[field] = str(current.get(field) or "").strip()
+    merged["binance_testnet"] = bool(payload.get("binance_testnet", current.get("binance_testnet", True)))
+    merged["binance_mainnet_url"] = https_url(
+        payload.get("binance_mainnet_url", current.get("binance_mainnet_url")), "https://api.binance.com"
+    )
     merged["deriv_app_id"] = str(payload_value(payload, "deriv_app_id", current, merged, "") or "").strip()
     incoming_token = str(payload.get("deriv_token") or "").strip()
     if payload.get("clear_deriv_token"):
@@ -1173,10 +1198,28 @@ def broker_status():
     )
 
 
+def binance_broker_test(state: dict) -> dict:
+    try:
+        broker = live_broker_from_settings(state["settings"])
+        account = broker.account()
+        balances = [row for row in account.get("balances", []) if float(row.get("free") or 0) > 0]
+        network = "testnet" if broker.testnet else "MAINNET"
+        status = {"ok": True, "connected": True, "broker": "binance", "network": network,
+                  "message": f"Binance {network} connection verified ({len(balances)} funded assets).",
+                  "can_trade": bool(account.get("canTrade"))}
+    except BrokerError as exc:
+        status = {"ok": False, "connected": False, "broker": "binance", "message": str(exc)}
+    status = record_broker_status(state, status)
+    save_state(state)
+    return {"ok": status["ok"], "message": status["message"], "status": status}
+
+
 @app.post("/api/broker/test")
 def broker_test():
     state = load_state()
     settings = state.get("settings", {})
+    if settings.get("broker_provider") == "binance":
+        return jsonify(binance_broker_test(state))
     if not str(settings.get("deriv_app_id") or "").strip() or not str(settings.get("deriv_token") or "").strip():
         status = record_broker_status(
             state,
@@ -1276,6 +1319,56 @@ def paper_trade_open():
     return jsonify({"message": "Paper trade opened", "position": position})
 
 
+def binance_live_open(state: dict, symbol: str, side: str, amount: float):
+    broker = None
+    try:
+        broker = live_broker_from_settings(state["settings"])
+        trade = broker.open_trade(symbol=symbol, side=side, amount=amount)
+    except BrokerError as exc:
+        auto_event(state, "LIVE_ERROR", symbol, side, amount, str(exc))
+        save_state(state)
+        return error_response(str(exc), 400)
+    finally:
+        if broker is not None:
+            broker.close()
+    state["auto_trader"]["pending_live"].append(
+        {"ref": trade["ref"], "symbol": symbol, "side": side, "stake": trade["price"],
+         "opened_at": utc_now_iso(), "position": trade["position"]}
+    )
+    network = "testnet" if broker.testnet else "MAINNET"
+    auto_event(state, "LIVE_OPEN", symbol, side, trade["price"],
+               f"Binance {network} buy {trade['position']['qty']} @ {trade['position']['avg_price']}.")
+    save_state(state)
+    return jsonify({"message": f"Binance {network} buy filled.", "trade": trade})
+
+
+@app.post("/api/live-positions/<ref>/close")
+def live_position_close(ref: str):
+    state = load_state()
+    auto = state["auto_trader"]
+    item = next((row for row in auto["pending_live"] if str(row.get("ref")) == ref), None)
+    if item is None:
+        return error_response("No open live position with that reference.", 404)
+    broker = None
+    try:
+        broker = live_broker_from_settings(state["settings"])
+        if getattr(broker, "settles_itself", True):
+            return error_response(f"{broker.name} contracts settle on their own.", 400)
+        result = broker.close_trade(item.get("position") or {})
+    except BrokerError as exc:
+        return error_response(str(exc), 400)
+    finally:
+        if broker is not None:
+            broker.close()
+    auto["pending_live"] = [row for row in auto["pending_live"] if row is not item]
+    record_close(auto, state["settings"], symbol=item["symbol"], side=item["side"],
+                 pnl=result["profit"], now=utcnow(), mode="live")
+    auto_event(state, "LIVE_SETTLED", item["symbol"], item["side"], item["stake"],
+               f"Position {ref} closed manually {float(result['profit']):+.2f}.")
+    save_state(state)
+    return jsonify({"message": "Position closed.", "result": result, "auto_trader": auto})
+
+
 @app.post("/api/live-trades/open")
 def live_trade_open():
     state = load_state()
@@ -1304,6 +1397,8 @@ def live_trade_open():
         payload.get("currency", settings.get("live_trade_currency", "USD")),
         settings.get("live_trade_currency", "USD"),
     )
+    if settings.get("broker_provider") == "binance":
+        return binance_live_open(state, symbol, side, amount)
     contract_type = sanitize_live_contract_type(payload.get("contract_type"), side)
     client = deriv_client_from_settings(settings)
     try:
@@ -1463,11 +1558,19 @@ def auto_event(
     )
 
 
+def position_status(broker, item: dict, now, hold_minutes: object) -> dict:
+    if getattr(broker, "settles_itself", True):
+        return broker.trade_status(item["ref"])
+    if not due_positions([{**item, "auto": True}], now, hold_minutes):
+        return {"settled": False}
+    return {"settled": True, **broker.close_trade(item.get("position") or {})}
+
+
 def settle_live_trades(state: dict, auto: dict, broker, now) -> None:
     still_pending = []
     for item in auto["pending_live"]:
         try:
-            status = broker.trade_status(item["ref"])
+            status = position_status(broker, item, now, state["settings"].get("auto_hold_minutes", 25))
         except BrokerError as exc:
             auto["last_error"] = str(exc)
             still_pending.append(item)
@@ -1481,7 +1584,8 @@ def settle_live_trades(state: dict, auto: dict, broker, now) -> None:
         )
         auto_event(
             state, "LIVE_SETTLED", item["symbol"], item["side"], item["stake"],
-            f"Contract {item['ref']} settled {float(status['profit']):+.2f}.",
+            f"{'Contract' if getattr(broker, 'settles_itself', True) else 'Position'} {item['ref']} "
+            f"settled {float(status['profit']):+.2f}.",
         )
     auto["pending_live"] = still_pending
 
@@ -1528,6 +1632,10 @@ def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
     held = state.get("portfolio", []) + [{"symbol": item["symbol"]} for item in auto["pending_live"]]
     for signal in pick_entries(market_view(settings), held, settings, len(held)):
         symbol, side = signal["symbol"], signal["decision"]
+        if auto["mode"] == "live" and side not in getattr(broker, "sides", {"BUY", "SELL"}):
+            allowed = "/".join(sorted(broker.sides))
+            auto["paused_reason"] = f"{broker.name} only opens {allowed}; skipped {side} {symbol}."
+            continue
         if auto["mode"] == "live":
             stake = float(settings.get("live_trade_stake", 1.0))
             try:
@@ -1538,7 +1646,8 @@ def open_auto_trades(state: dict, auto: dict, broker, now) -> None:
                 continue
             exposure = trade["price"]
             auto["pending_live"].append(
-                {"ref": trade["ref"], "symbol": symbol, "side": side, "stake": exposure, "opened_at": utc_now_iso()}
+                {"ref": trade["ref"], "symbol": symbol, "side": side, "stake": exposure,
+                 "opened_at": utc_now_iso(), "position": trade.get("position")}
             )
             note = f"Live {trade.get('contract_type', '')} via {broker.name}, contract {trade['ref'] or 'pending'}."
         else:
@@ -1638,12 +1747,16 @@ def auto_status():
 
 @app.post("/api/auto/start")
 def auto_start():
-    mode = str(json_payload().get("mode") or "paper").strip().lower()
+    payload = json_payload()
+    mode = str(payload.get("mode") or "paper").strip().lower()
     settings = load_state()["settings"]
     if mode not in {"paper", "live"}:
         return error_response("mode must be 'paper' or 'live'.")
     if mode == "live" and not settings.get("live_trading_enabled", False):
         return error_response("Enable live trading in settings before starting live auto-trading.")
+    mainnet = settings.get("broker_provider") == "binance" and not settings.get("binance_testnet", True)
+    if mode == "live" and mainnet and payload.get("confirm_mainnet") is not True:
+        return error_response("Binance MAINNET uses real funds: resend with confirm_mainnet=true to start.")
     if mode == "paper" and not settings.get("paper_trading_enabled", True):
         return error_response("Paper trading is disabled in settings.")
     if not normalize_symbols(settings.get("symbols", [])):
