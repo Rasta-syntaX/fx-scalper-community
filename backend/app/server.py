@@ -205,6 +205,7 @@ DEFAULT_STATE = {
         "market_snapshots": [],
         "market_source": "deriv",
         "market_replay_file": "",
+        "binance_data_url": "https://data-api.binance.vision",
         "market_granularity": 300,
         "market_candle_count": 200,
         "trade_direction": "both",
@@ -755,6 +756,18 @@ def build_rebalance_plan(state: dict) -> dict:
     }
 
 
+def clamp_float(value: object, default: float, low: float, high: float) -> float:
+    try:
+        return max(low, min(high, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def https_url(value: object, default: str) -> str:
+    url = str(value or "").strip().rstrip("/")
+    return url if url.startswith("https://") else default
+
+
 def candle_backtest(settings: dict, options: dict) -> dict:
     """Replay the rule engine over real candles for every configured symbol."""
     symbols = normalize_symbols(settings.get("symbols", []))
@@ -762,16 +775,16 @@ def candle_backtest(settings: dict, options: dict) -> dict:
     horizon = clamp_int(options.get("horizon_bars"), 5, 1, 100)
     count = clamp_int(options.get("candle_count"), 1000, 150, 5000)
     window = clamp_int(options.get("window"), 100, 50, 1000)
-    try:
-        payout = max(0.0, min(500.0, float(options.get("payout_pct") or 0))) / 100.0
-    except (TypeError, ValueError):
-        payout = 0.0
+    payout = clamp_float(options.get("payout_pct"), 0.0, 0.0, 500.0) / 100.0
+    default_fee = 0.1 if str(settings.get("market_source")) == "binance" else 0.0
+    fee = clamp_float(options.get("fee_pct", default_fee), default_fee, 0.0, 5.0)
     report = {
         "source": str(settings.get("market_source") or "deriv"),
         "granularity": granularity,
         "horizon_bars": horizon,
         "requested_candles": count,
         "payout_pct": round(payout * 100, 2),
+        "fee_pct": fee,
         "results": [],
         "errors": [],
     }
@@ -799,6 +812,7 @@ def candle_backtest(settings: dict, options: dict) -> dict:
                     window=window,
                     direction=settings.get("trade_direction", "both"),
                     payout=payout or None,
+                    fee_pct=fee,
                 )
             )
         except MarketDataError as exc:
@@ -1057,7 +1071,10 @@ def normalize_settings(payload: dict, current: dict) -> dict:
         tolerance = current.get("rebalance_tolerance", 0.08)
     merged["rebalance_tolerance"] = max(0.0, min(tolerance, 0.50))
     source = str(payload.get("market_source", current.get("market_source", "deriv")) or "deriv").strip().lower()
-    merged["market_source"] = source if source in {"deriv", "replay"} else "deriv"
+    merged["market_source"] = source if source in {"deriv", "replay", "binance"} else "deriv"
+    merged["binance_data_url"] = https_url(
+        payload.get("binance_data_url", current.get("binance_data_url")), "https://data-api.binance.vision"
+    )
     merged["market_replay_file"] = str(
         payload.get("market_replay_file", current.get("market_replay_file", "")) or ""
     ).strip()

@@ -23,7 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
     backtest = commands.add_parser("backtest", help="walk-forward backtest of the rule engine over candles")
     backtest.add_argument("--symbol", action="append", required=True, help="repeat for several symbols")
     backtest.add_argument("--asset-class", default="FOREX")
-    backtest.add_argument("--replay", help="replay JSON file (default: live Deriv candles)")
+    backtest.add_argument("--replay", help="replay JSON file (overrides --source)")
+    backtest.add_argument("--source", choices=["deriv", "binance"], default="deriv", help="live candle source")
+    backtest.add_argument("--fee", type=float, default=None, help="fee %% per side (default 0.1 for binance)")
     backtest.add_argument("--granularity", type=int, default=300, help="candle size in seconds")
     backtest.add_argument("--candles", type=int, default=1000)
     backtest.add_argument("--horizon", type=int, default=5, help="exit after this many bars")
@@ -36,7 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def print_table(results: List[dict], errors: List[dict]) -> None:
     payout = any(row.get("payout") for row in results)
+    fees = any(row.get("fee_pct") for row in results)
     header = f"{'symbol':<14}{'trades':>7}{'win %':>8}{'total %':>10}{'max DD %':>10}"
+    if fees:
+        header += f"{'net %':>10}"
     if payout:
         header += f"{'net/$1':>9}{'BE win %':>10}"
     print(header)
@@ -44,6 +49,8 @@ def print_table(results: List[dict], errors: List[dict]) -> None:
         win = "-" if row["win_rate"] is None else f"{row['win_rate'] * 100:.1f}"
         line = f"{row['symbol']:<14}{row['trades']:>7}{win:>8}"
         line += f"{row['total_return_pct']:>10.3f}{row['max_drawdown_pct']:>10.3f}"
+        if fees:
+            line += f"{row['total_net_return_pct']:>10.3f}"
         if payout:
             line += f"{row['net_per_stake']:>9.2f}{row['break_even_win_rate'] * 100:>10.1f}"
         print(line)
@@ -56,7 +63,8 @@ def backtest(args: argparse.Namespace) -> int:
     if args.replay:
         settings.update({"market_source": "replay", "market_replay_file": os.path.abspath(args.replay)})
     else:
-        settings["market_source"] = "deriv"
+        settings["market_source"] = args.source
+    fee = args.fee if args.fee is not None else (0.1 if settings["market_source"] == "binance" else 0.0)
     settings["trade_direction"] = args.direction
     results, errors = [], []
     try:
@@ -71,7 +79,7 @@ def backtest(args: argparse.Namespace) -> int:
                 run_backtest(
                     symbol, args.asset_class, candles, settings, evaluate_snapshot,
                     horizon=args.horizon, window=args.window, direction=args.direction,
-                    payout=(args.payout / 100.0) or None,
+                    payout=(args.payout / 100.0) or None, fee_pct=fee,
                 )
             )
         except MarketDataError as exc:
