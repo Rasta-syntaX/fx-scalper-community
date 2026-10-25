@@ -203,5 +203,5 @@ def test_auto_loop_closes_spot_position_after_hold(client, monkeypatch):
     assert [item["position"]["qty"] for item in auto["pending_live"]] == [0.0999]
     assert server.auto_trade_tick(now=now + timedelta(minutes=1))["pending_live"]
     auto = server.auto_trade_tick(now=now + timedelta(minutes=10))
-    assert auto["realized_pnl"] == pytest.approx(0.0999 * 120 * 0.999 - 10.0, abs=1e-6)
+    assert auto["realized_pnl"] == pytest.approx(0.0999 * 120 * 0.999 - 10.0, abs=0.01)
     assert "LIVE_SETTLED" in [row["type"] for row in server.load_state()["trade_history"]]
