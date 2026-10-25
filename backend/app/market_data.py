@@ -11,22 +11,27 @@ Two providers ship here:
                         (ticks_history with style=candles). Market data needs no
                         API token, only an app_id, so this works out of the box.
                         A token is accepted and used if one is configured.
+  BinanceCandleProvider Public Binance spot klines over REST. No API key needed;
+                        the base URL is configurable (data-api.binance.vision by
+                        default, api.binance.us for US users).
   ReplayCandleProvider  Deterministic candles from a JSON fixture. Use it for
                         local development, tests and CI so nothing has to reach
                         the network.
 
 Choose with the COMMUNITY_MARKET_SOURCE environment variable ("deriv" by
-default, or "replay") or with the market_source setting.
+default, "binance" or "replay") or with the market_source setting.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Mapping, Optional
 
+import requests
 import websocket
 
 DEFAULT_WS_URL = "wss://ws.derivws.com/websockets/v3"
@@ -37,9 +42,18 @@ DEFAULT_TIMEOUT = 20.0
 
 GRANULARITIES = (60, 120, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400)
 
+DEFAULT_BINANCE_DATA_URL = "https://data-api.binance.vision"
+BINANCE_INTERVALS = {
+    60: "1m", 180: "3m", 300: "5m", 900: "15m", 1800: "30m", 3600: "1h",
+    7200: "2h", 14400: "4h", 28800: "8h", 86400: "1d",
+}
+BINANCE_PAGE = 1000
+
 __all__ = [
     "Candle",
+    "BinanceCandleProvider",
     "CandleProvider",
+    "DEFAULT_BINANCE_DATA_URL",
     "DerivCandleProvider",
     "MarketDataError",
     "ReplayCandleProvider",
@@ -299,6 +313,83 @@ class ReplayCandleProvider(CandleProvider):
         return (list(candles) * repeats)[-count:]
 
 
+class BinanceCandleProvider(CandleProvider):
+    """Closed spot candles from Binance's public klines endpoint (no API key)."""
+
+    name = "binance"
+
+    def __init__(self, base_url: object = DEFAULT_BINANCE_DATA_URL, timeout: float = DEFAULT_TIMEOUT,
+                 session: Optional[object] = None) -> None:
+        self.base_url = (str(base_url or "").strip() or DEFAULT_BINANCE_DATA_URL).rstrip("/")
+        self.timeout = float(timeout)
+        self.session = session or requests
+
+    def _page(self, symbol: str, interval: str, limit: int, end_ms: Optional[int]) -> list:
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        if end_ms is not None:
+            params["endTime"] = end_ms
+        try:
+            response = self.session.get(self.base_url + "/api/v3/klines", params=params, timeout=self.timeout)
+        except requests.RequestException as error:
+            raise MarketDataError("Binance request failed for {}: {}".format(symbol, error)) from error
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+        if response.status_code != 200:
+            message = payload.get("msg") if isinstance(payload, Mapping) else ""
+            hint = " Binance blocks this location; try https://api.binance.us." if response.status_code == 451 else ""
+            raise MarketDataError(
+                "Binance returned HTTP {} for {}: {}{}".format(response.status_code, symbol, message or "error", hint)
+            )
+        if not isinstance(payload, list):
+            raise MarketDataError("Binance returned an unexpected klines payload for {}".format(symbol))
+        return payload
+
+    def get_candles(
+        self,
+        symbol: str,
+        granularity: int = DEFAULT_GRANULARITY,
+        count: int = DEFAULT_COUNT,
+    ) -> List[Candle]:
+        granularity = validate_granularity(granularity)
+        interval = BINANCE_INTERVALS.get(granularity)
+        if interval is None:
+            raise MarketDataError(
+                "Binance has no {}s interval; use one of {}".format(granularity, sorted(BINANCE_INTERVALS))
+            )
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            raise MarketDataError("symbol is required")
+        count = max(1, int(count))
+        now_ms = int(time.time() * 1000)
+        rows: list = []
+        end_ms: Optional[int] = None
+        while len(rows) < count + 1:
+            page = self._page(symbol, interval, min(BINANCE_PAGE, count + 1 - len(rows)), end_ms)
+            if not page:
+                break
+            rows = page + rows
+            end_ms = int(page[0][0]) - 1
+            if len(page) < BINANCE_PAGE:
+                break
+        candles = [
+            Candle(
+                epoch=int(row[0]) // 1000,
+                open=float(row[1]),
+                high=float(row[2]),
+                low=float(row[3]),
+                close=float(row[4]),
+                volume=float(row[5]),
+            )
+            for row in rows
+            if int(row[6]) < now_ms
+        ]
+        if not candles:
+            raise MarketDataError("Binance returned no closed candles for {}".format(symbol))
+        return candles[-count:]
+
+
 def provider_from_settings(settings: Optional[Mapping] = None) -> CandleProvider:
     """Pick a provider from the environment first, then the settings dict."""
     settings = settings or {}
@@ -313,6 +404,10 @@ def provider_from_settings(settings: Optional[Mapping] = None) -> CandleProvider
             )
         return ReplayCandleProvider.from_file(
             path, granularity=settings.get("market_replay_granularity")
+        )
+    if source == "binance":
+        return BinanceCandleProvider(
+            base_url=os.getenv("COMMUNITY_BINANCE_DATA_URL") or settings.get("binance_data_url")
         )
     app_id = os.getenv("COMMUNITY_DERIV_APP_ID") or settings.get("deriv_app_id") or DEFAULT_APP_ID
     ws_url = os.getenv("COMMUNITY_DERIV_WS_URL") or settings.get("deriv_ws_url") or DEFAULT_WS_URL

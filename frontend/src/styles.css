@@ -397,3 +397,425 @@ textarea {
     width: 100%;
   }
 }
+
+/* --- Theme, layout and components added for the tabbed dashboard --- */
+:root {
+  --surface: rgba(255, 255, 255, 0.04);
+  --up: #22c55e;
+  --down: #ef4444;
+  --warn: #f59e0b;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6fb;
+  --bg-soft: rgba(255, 255, 255, 0.92);
+  --border: rgba(15, 23, 42, 0.12);
+  --text: #0f172a;
+  --muted: #475569;
+  --surface: rgba(15, 23, 42, 0.04);
+  --up: #15803d;
+  --down: #b91c1c;
+}
+
+[data-theme="light"] body {
+  background: linear-gradient(180deg, #eef2ff 0%, #f8fafc 100%);
+}
+
+[data-theme="light"] .hero-panel,
+[data-theme="light"] .card {
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+}
+
+.section-card,
+.hero-panel,
+.field,
+.item-row > *,
+.tab-grid > * {
+  min-width: 0;
+}
+
+.input,
+.select,
+textarea {
+  max-width: 100%;
+}
+
+.item-row {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.kv,
+.note,
+.item-title {
+  overflow-wrap: anywhere;
+}
+
+.topbar {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px 16px;
+  padding: 16px 20px;
+  margin-bottom: 18px;
+  position: sticky;
+  top: 8px;
+  z-index: 20;
+}
+
+.topbar h1 {
+  margin: 2px 0 0;
+  font-size: 1.4rem;
+}
+
+.status-pills,
+.topbar-actions,
+.chip-row,
+.journal-filters,
+.picker-custom {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.topbar-actions {
+  justify-content: flex-end;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.pill-on {
+  color: var(--up);
+  border-color: currentColor;
+}
+
+.pill-warn {
+  color: var(--warn);
+  border-color: currentColor;
+}
+
+.pill-danger {
+  color: var(--down);
+  border-color: currentColor;
+  font-weight: 700;
+}
+
+.tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  margin: -6px 0 12px;
+  padding: 0 4px;
+}
+
+.tab {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  padding: 8px 14px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tab.active {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.tab:focus-visible,
+.button:focus-visible,
+.chip:focus-visible {
+  outline: 2px solid var(--secondary);
+  outline-offset: 2px;
+}
+
+.button.danger {
+  background: var(--down);
+  border-color: var(--down);
+  color: #fff;
+}
+
+.icon-button {
+  min-width: 42px;
+}
+
+.tab-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr));
+  gap: 18px;
+  margin-top: 18px;
+}
+
+.tab-section {
+  display: contents;
+}
+
+.chart-card,
+.journal-card {
+  grid-column: 1 / -1;
+}
+
+.chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
+.chart-head h2 {
+  margin: 0;
+}
+
+.candle-svg {
+  width: 100%;
+  height: 240px;
+  display: block;
+}
+
+.candle-up,
+.up {
+  color: var(--up);
+}
+
+.candle-down,
+.down {
+  color: var(--down);
+}
+
+.marker-buy {
+  fill: var(--up);
+  stroke: var(--text);
+  stroke-width: 1;
+}
+
+.marker-sell {
+  fill: var(--down);
+  stroke: var(--text);
+  stroke-width: 1;
+}
+
+.chart-legend {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+.journal-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.journal-table th,
+.journal-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.journal-table .num {
+  text-align: right;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.note-cell {
+  min-width: 220px;
+  color: var(--muted);
+}
+
+.sort-button {
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+}
+
+.journal-filters .input {
+  flex: 1 1 200px;
+}
+
+.field-wide {
+  grid-column: 1 / -1;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.chip small {
+  color: var(--muted);
+}
+
+.chip button {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.chip-add {
+  cursor: pointer;
+  border-style: dashed;
+}
+
+.picker-custom .input {
+  flex: 1 1 200px;
+}
+
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-weight: 400;
+}
+
+.toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: grid;
+  gap: 8px;
+  z-index: 50;
+  width: min(380px, calc(100% - 32px));
+}
+
+.toast {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 12px 30px rgba(2, 6, 23, 0.35);
+  border-left: 4px solid var(--up);
+}
+
+.toast.error {
+  border-left-color: var(--down);
+}
+
+.toast-close {
+  background: none;
+  border: 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 1.1rem;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.6);
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  z-index: 60;
+}
+
+.modal {
+  width: min(460px, 100%);
+  padding: 22px;
+}
+
+.modal h2 {
+  margin-top: 0;
+}
+
+@media (max-width: 640px) {
+  .page-shell {
+    width: calc(100% - 16px);
+    padding: 8px 0 88px;
+  }
+
+  .topbar {
+    grid-template-columns: 1fr;
+    position: static;
+    padding: 14px;
+  }
+
+  .topbar-actions {
+    justify-content: flex-start;
+  }
+
+  .tabs {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 40;
+    justify-content: space-around;
+    padding: 8px 6px calc(8px + env(safe-area-inset-bottom));
+    background: var(--bg-soft);
+    backdrop-filter: blur(16px);
+    border-top: 1px solid var(--border);
+  }
+
+  .tab {
+    padding: 8px 6px;
+    flex: 1 1 0;
+    font-size: 0.8rem;
+  }
+
+  .hero-panel {
+    padding: 14px;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .toast-stack {
+    bottom: 76px;
+  }
+
+  .candle-svg {
+    height: 180px;
+  }
+}
+
+.chart-head .select {
+  width: auto;
+  min-width: 160px;
+}

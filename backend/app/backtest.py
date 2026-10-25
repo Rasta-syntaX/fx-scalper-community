@@ -57,9 +57,11 @@ def run_backtest(
     window: int = 100,
     direction: str = "both",
     payout: Optional[float] = None,
+    fee_pct: float = 0.0,
 ) -> Dict[str, object]:
     """Walk-forward test. With ``payout`` (e.g. 0.85) each trade is also scored as a fixed-stake
-    contract: +payout per $1 on a win, -1 on a loss."""
+    contract: +payout per $1 on a win, -1 on a loss. ``fee_pct`` (per side, e.g. 0.1 for Binance spot)
+    adds net-of-fees returns for exchange-style trading."""
     settings = settings or {}
     config = IndicatorSettings.from_settings(settings)
     candles = contiguous_tail(candles)
@@ -129,6 +131,20 @@ def run_backtest(
         "recent_trades": trades[-MAX_TRADES_RETURNED:],
         "equity_curve": equity_curve(returns),
     }
+    if fee_pct and fee_pct > 0:
+        net = [value - 2.0 * fee_pct for value in returns]
+        net_wins = sum(1 for value in net if value > 0)
+        report.update(
+            {
+                "fee_pct": round(fee_pct, 4),
+                "net_wins": net_wins,
+                "net_win_rate": round(net_wins / len(net), 4) if net else None,
+                "total_net_return_pct": round(sum(net), 4),
+                "avg_net_return_pct": round(sum(net) / len(net), 4) if net else None,
+                "max_net_drawdown_pct": round(_max_drawdown(net), 4),
+                "net_equity_curve": equity_curve(net),
+            }
+        )
     if payout:
         stake = [payout if value > 0 else -1.0 for value in returns]
         report.update(

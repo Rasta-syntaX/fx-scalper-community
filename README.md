@@ -151,6 +151,25 @@ window is still warming up.
 
 ---
 
+## 🪙 Binance (crypto)
+
+Binance works as a **market-data source** and as a **Spot broker**.
+
+- **Market data (no API key):** set *Market data source* to Binance in Settings (or `"market_source": "binance"`). Candles come from the public `https://data-api.binance.vision` klines endpoint. Use `https://api.binance.us` if Binance blocks your region (HTTP 451). Scans, backtests and paper auto-trading all work on it.
+- **Spot trading (buys only, testnet by default):** set *Broker provider* to Binance and paste a key/secret from [testnet.binance.vision](https://testnet.binance.vision). The bot places a market BUY sized in USDT and sells it with a market SELL after *Hold minutes* (or when you press *Sell now*). SELL signals are skipped, because shorting needs Futures. Exchange step size and minimum notional are respected, and P&L comes from real fills minus fees.
+- **Mainnet:** untick *Use testnet*. Starting live auto-trading on mainnet asks for an explicit confirmation (`confirm_mainnet: true` over the API). Create the key **without withdrawal permission** and restrict it to your IP.
+- **Keys are write-only:** the API never returns them. *Remove Binance keys* clears them.
+- **Fees:** backtests on Binance subtract 0.1% per side by default (`--fee` on the CLI, *Fee % per side* in the UI). Spread and slippage are not modelled.
+
+```bash
+cd backend
+python -m app.cli backtest --source binance --symbol BTCUSDT --symbol ETHUSDT --candles 2000
+```
+
+## 🖥️ Dashboard
+
+Tabs for Dashboard, Trade, Backtest, Journal and Settings. Status refreshes every 10 seconds and shows when data is stale. It works on phones (bottom tab bar) and has a light/dark theme. **Try demo data** loads the bundled replay candles in paper mode. Other features: a symbol picker with presets, a candle chart with your BUY/SELL markers, a searchable journal table with CSV export, and a confirm dialog before anything live.
+
 ## 🔒 Security
 
 This bot can place real trades, so treat the API like a wallet:
