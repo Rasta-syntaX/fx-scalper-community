@@ -1778,6 +1778,48 @@ def auto_tick():
     return jsonify({"auto_trader": auto_trade_tick()})
 
 
+@app.get("/api/candles")
+def candles_route():
+    settings = load_state()["settings"]
+    symbol = str(request.args.get("symbol") or "").strip()
+    if symbol not in symbol_map_from_settings(settings):
+        return error_response("Unknown symbol. Add it in settings first.", 404)
+    count = clamp_int(request.args.get("count"), 120, 20, 500)
+    try:
+        provider = provider_from_settings(settings)
+        rows = provider.get_candles(symbol, settings.get("market_granularity", DEFAULT_GRANULARITY), count)
+    except MarketDataError as exc:
+        return error_response(str(exc), 502)
+    return jsonify({"symbol": symbol, "source": provider.name,
+                    "candles": [{"epoch": c.epoch, "open": c.open, "high": c.high, "low": c.low, "close": c.close}
+                                for c in rows]})
+
+
+@app.get("/api/journal")
+def journal_route():
+    limit = clamp_int(request.args.get("limit"), 200, 1, 1000)
+    return jsonify({"entries": load_state().get("trade_history", [])[:limit]})
+
+
+@app.post("/api/demo")
+def demo_setup():
+    """Point the bot at the bundled replay candles so a fresh install has something to show."""
+    state = load_state()
+    state["settings"] = normalize_settings(
+        {
+            "market_source": "replay",
+            "market_replay_file": str(DEFAULT_DATA_DIR / "replay_sample.json"),
+            "symbols": [{"symbol": "frxEURUSD", "asset_class": "FOREX", "display_name": "EUR/USD (demo)"}],
+            "paper_trading_enabled": True,
+            "live_trading_enabled": False,
+        },
+        state["settings"],
+    )
+    report = run_market_scan(state)
+    save_state(state)
+    return jsonify({"message": "Demo data loaded: replay candles, paper trading only.", "scan": report})
+
+
 @app.post("/api/reset")
 def reset():
     stop_auto_thread()

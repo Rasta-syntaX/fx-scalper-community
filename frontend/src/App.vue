@@ -1,5 +1,10 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import CandleChart from './components/CandleChart.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
+import JournalTable from './components/JournalTable.vue'
+import SymbolPicker from './components/SymbolPicker.vue'
+import ToastStack from './components/ToastStack.vue'
 import axios from 'axios'
 
 const baseUrl = import.meta.env.BASE_URL || '/'
@@ -74,6 +79,11 @@ const settingsForm = reactive({
   broker_provider: 'deriv',
   deriv_app_id: '',
   deriv_token: '',
+  market_source: 'deriv',
+  binance_data_url: 'https://data-api.binance.vision',
+  binance_api_key: '',
+  binance_api_secret: '',
+  binance_testnet: true,
   deriv_api_url: 'https://api.derivws.com',
   deriv_ws_url: 'wss://ws.derivws.com/websockets/v3',
   deriv_options_account_mode: 'demo',
@@ -110,6 +120,70 @@ const symbolsJson = ref('[]')
 const marketSnapshotsJson = ref('[]')
 const liveOrderResult = ref(null)
 
+const TABS = [
+  ['dashboard', 'Dashboard'],
+  ['trade', 'Trade'],
+  ['backtest', 'Backtest'],
+  ['journal', 'Journal'],
+  ['settings', 'Settings'],
+]
+const initialTab = window.location.hash.slice(1)
+const tab = ref(TABS.some(([id]) => id === initialTab) ? initialTab : 'dashboard')
+watch(tab, (value) => window.history.replaceState(null, '', `#${value}`))
+
+const THEME_STORAGE = 'fx-scalper-community-theme'
+const theme = ref(localStorage.getItem(THEME_STORAGE) || 'dark')
+watch(
+  theme,
+  (value) => {
+    document.documentElement.dataset.theme = value
+    localStorage.setItem(THEME_STORAGE, value)
+  },
+  { immediate: true },
+)
+
+const toasts = ref([])
+let toastId = 0
+function dismissToast(id) {
+  toasts.value = toasts.value.filter((toast) => toast.id !== id)
+}
+function pushToast(kind, text) {
+  const id = ++toastId
+  toasts.value = [...toasts.value.slice(-3), { id, kind, text }]
+  setTimeout(() => dismissToast(id), kind === 'error' ? 8000 : 4000)
+}
+
+const confirmState = reactive({ open: false, title: '', body: '', confirmLabel: 'Confirm', resolve: null })
+function askConfirm({ title, body, confirmLabel = 'Confirm' }) {
+  return new Promise((resolve) => Object.assign(confirmState, { open: true, title, body, confirmLabel, resolve }))
+}
+function settleConfirm(value) {
+  const resolve = confirmState.resolve
+  confirmState.open = false
+  confirmState.resolve = null
+  if (resolve) resolve(value)
+}
+
+const lastUpdated = ref(null)
+const stale = ref(false)
+const refreshKey = ref(0)
+const lastUpdatedLabel = computed(() => (lastUpdated.value ? lastUpdated.value.toLocaleTimeString() : '–'))
+let pollTimer = null
+async function pollStatus() {
+  if (document.visibilityState !== 'visible' || busy.value || loading.value || confirmState.open) return
+  try {
+    const { data } = await api.get('bootstrap')
+    bootstrapData.value = data
+    if (!['settings', 'trade'].includes(tab.value)) syncFromBootstrap()
+  } catch {
+    stale.value = true
+  }
+}
+onMounted(() => {
+  pollTimer = setInterval(pollStatus, 10000)
+})
+onBeforeUnmount(() => clearInterval(pollTimer))
+
 const stats = computed(() => bootstrapData.value.stats || {})
 const market = computed(() => bootstrapData.value.market || [])
 const signals = computed(() => bootstrapData.value.signals || [])
@@ -137,10 +211,32 @@ function zeroLine(points, height = 48) {
 }
 
 async function startAuto(mode) {
-  if (mode === 'live' && !window.confirm('Start LIVE auto-trading? Real trades will be placed on your broker account.')) {
-    return
+  const payload = { mode }
+  if (mode === 'live') {
+    const ok = await askConfirm({
+      title: binanceMainnet.value ? 'Start live trading on Binance MAINNET?' : `Start live auto-trading on ${networkLabel.value}?`,
+      body: binanceMainnet.value
+        ? 'This uses real funds. The bot places Spot buys and sells them after the hold time. Use an API key without withdrawal permission.'
+        : 'The bot will place orders on your broker account without asking again. Stop is the kill switch.',
+      confirmLabel: 'Start live',
+    })
+    if (!ok) return
+    if (binanceMainnet.value) payload.confirm_mainnet = true
   }
-  await runAction(() => api.post('auto/start', { mode }), `Auto-trader started (${mode}).`)
+  await runAction(() => api.post('auto/start', payload), `Auto-trader started (${mode}).`)
+}
+
+async function loadDemo() {
+  await runAction(() => api.post('demo'), 'Demo data loaded: replay candles, paper trading only.')
+  tab.value = 'dashboard'
+}
+
+async function forgetBinanceKeys() {
+  await runAction(() => api.post('config', { clear_binance_keys: true }), 'Saved Binance keys removed.')
+}
+
+async function closeLivePosition(ref) {
+  await runAction(() => api.post(`live-positions/${encodeURIComponent(ref)}/close`), 'Position sold.')
 }
 
 async function stopAuto() {
@@ -165,7 +261,7 @@ const rebalancePlan = computed(() => bootstrapData.value.rebalance_plan || { act
 const symbols = computed(() => bootstrapData.value.symbols || [])
 const lastBacktest = computed(() => bootstrapData.value.last_backtest)
 const candleBacktest = computed(() => lastBacktest.value?.candle_backtest || null)
-const backtestOptions = ref({ horizon_bars: 5, candle_count: 1000, payout_pct: 0 })
+const backtestOptions = ref({ horizon_bars: 5, candle_count: 1000, payout_pct: 0, fee_pct: null })
 
 function formatRate(value) {
   return value === null || value === undefined ? '–' : `${(value * 100).toFixed(1)}%`
@@ -197,6 +293,21 @@ const brokerTokenLabel = computed(() => {
 })
 
 const derivTokenSaved = computed(() => Boolean(bootstrapData.value.settings?.deriv_token_set))
+const binanceKeysSaved = computed(() => Boolean(bootstrapData.value.settings?.binance_key_set))
+const brokerName = computed(() => bootstrapData.value.settings?.broker_provider || 'deriv')
+const binanceMainnet = computed(
+  () => brokerName.value === 'binance' && bootstrapData.value.settings?.binance_testnet === false,
+)
+const networkLabel = computed(() => {
+  if (brokerName.value === 'binance') return binanceMainnet.value ? 'Binance MAINNET' : 'Binance testnet'
+  return `Deriv ${bootstrapData.value.settings?.deriv_options_account_mode || 'demo'}`
+})
+watch(errorMessage, (value) => value && pushToast('error', value))
+watch(successMessage, (value) => value && pushToast('success', value))
+watch(bootstrapData, () => {
+  lastUpdated.value = new Date()
+  stale.value = false
+})
 
 const marketMap = computed(() => {
   return Object.fromEntries(market.value.map((row) => [row.symbol, row]))
@@ -258,6 +369,11 @@ function syncFromBootstrap() {
   settingsForm.broker_provider = settings.broker_provider || 'deriv'
   settingsForm.deriv_app_id = settings.deriv_app_id || ''
   settingsForm.deriv_token = settings.deriv_token || ''
+  settingsForm.market_source = settings.market_source || 'deriv'
+  settingsForm.binance_data_url = settings.binance_data_url || 'https://data-api.binance.vision'
+  settingsForm.binance_api_key = ''
+  settingsForm.binance_api_secret = ''
+  settingsForm.binance_testnet = settings.binance_testnet !== false
   settingsForm.deriv_api_url = settings.deriv_api_url || 'https://api.derivws.com'
   settingsForm.deriv_ws_url = settings.deriv_ws_url || 'wss://ws.derivws.com/websockets/v3'
   settingsForm.deriv_options_account_mode = settings.deriv_options_account_mode || 'demo'
@@ -335,6 +451,7 @@ async function runAction(action, successText) {
   try {
     await action()
     await refreshBootstrapState()
+    refreshKey.value += 1
     if (successText) {
       setSuccess(successText)
     }
@@ -386,6 +503,11 @@ async function saveSettings() {
         broker_provider: settingsForm.broker_provider,
         deriv_app_id: settingsForm.deriv_app_id,
         deriv_token: settingsForm.deriv_token,
+        market_source: settingsForm.market_source,
+        binance_data_url: settingsForm.binance_data_url,
+        binance_api_key: settingsForm.binance_api_key,
+        binance_api_secret: settingsForm.binance_api_secret,
+        binance_testnet: settingsForm.binance_testnet,
         deriv_api_url: settingsForm.deriv_api_url,
         deriv_ws_url: settingsForm.deriv_ws_url,
         deriv_options_account_mode: settingsForm.deriv_options_account_mode,
@@ -521,23 +643,48 @@ onMounted(fetchBootstrap)
 
 <template>
   <main class="page-shell">
-    <section class="hero-panel">
-      <div class="hero-copy">
-        <div class="eyebrow">Hosted Community Edition</div>
-        <h1>Community Edition</h1>
-        <p>
-          Bring your own Deriv credentials, symbol universe, and market snapshots to run a
-          configurable paper-trading workflow without editing source code.
-        </p>
+    <header class="topbar card">
+      <div class="brand">
+        <div class="eyebrow">Community Edition · paper-first</div>
+        <h1>FX Scalper</h1>
       </div>
-
-      <div class="hero-badges">
-        <span class="badge">Paper + Live Optional</span>
-        <span class="badge">Deriv Broker Test</span>
-        <span class="badge">Vue 3 + Flask</span>
-        <span class="badge">Self-Hosted</span>
+      <div class="status-pills" aria-live="polite">
+        <span class="pill" :class="{ 'pill-on': autoTrader.running }">Auto {{ autoTrader.running ? autoTrader.mode : 'off' }}</span>
+        <span class="pill">{{ bootstrapData.settings?.market_source || 'deriv' }} data</span>
+        <span class="pill" :class="{ 'pill-danger': binanceMainnet }">{{ networkLabel }}</span>
+        <span class="pill" :class="{ 'pill-warn': stale }" :title="stale ? 'Last refresh failed' : 'Refreshes every 10s'">
+          {{ stale ? 'Stale' : 'Updated' }} {{ lastUpdatedLabel }}
+        </span>
       </div>
+      <div class="topbar-actions">
+        <button v-if="autoTrader.running" class="button danger" :disabled="busy" @click="stopAuto">Stop auto</button>
+        <button class="button secondary" :disabled="busy" @click="loadDemo">Try demo data</button>
+        <button
+          class="button secondary icon-button"
+          type="button"
+          :aria-label="`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`"
+          @click="theme = theme === 'dark' ? 'light' : 'dark'"
+        >
+          {{ theme === 'dark' ? '☀' : '☾' }}
+        </button>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button
+          v-for="[id, label] in TABS"
+          :key="id"
+          class="tab"
+          :class="{ active: tab === id }"
+          role="tab"
+          type="button"
+          :aria-selected="tab === id"
+          @click="tab = id"
+        >
+          {{ label }}
+        </button>
+      </nav>
+    </header>
 
+    <section v-show="tab === 'dashboard'" class="hero-panel">
       <div class="stats-grid">
         <article class="card stat-card">
           <div class="stat-label">Open Signals</div>
@@ -561,14 +708,13 @@ onMounted(fetchBootstrap)
         </article>
       </div>
 
-      <div v-if="errorMessage" class="status-banner error">{{ errorMessage }}</div>
-      <div v-if="successMessage" class="status-banner success">{{ successMessage }}</div>
 
       <div class="actions">
         <button class="button" :disabled="busy" @click="runBacktests">Run Backtests</button>
         <button class="button secondary" :disabled="busy" @click="applyRebalance">
           Apply Rebalance
         </button>
+        <button class="button secondary" :disabled="busy" @click="scanMarket">Scan Market</button>
         <button class="button secondary" :disabled="busy" @click="resetDemo">Reset Demo</button>
       </div>
 
@@ -594,6 +740,10 @@ onMounted(fetchBootstrap)
           <div class="item-row">
             <span>Today {{ autoTrader.day || '–' }}: {{ formatCurrency(autoTrader.realized_pnl || 0) }} realized</span>
             <span>{{ autoTrader.trades_today || 0 }} trades · {{ (autoTrader.pending_live || []).length }} live pending</span>
+          </div>
+          <div v-for="item in autoTrader.pending_live || []" :key="`pl-${item.ref}`" class="item-row">
+            <span>{{ item.symbol }} {{ item.side }} · {{ formatCurrency(item.stake) }} · ref {{ item.ref }}</span>
+            <button v-if="item.position" class="button secondary" :disabled="busy" @click="closeLivePosition(item.ref)">Sell now</button>
           </div>
           <div v-if="autoTrader.halted_reason" class="status-banner error">{{ autoTrader.halted_reason }}</div>
           <div v-if="autoTrader.last_error" class="note">Last error: {{ autoTrader.last_error }}</div>
@@ -624,7 +774,7 @@ onMounted(fetchBootstrap)
         <div class="section-body">
           <div class="stack-list">
             <div class="item-row">
-              <span>Deriv credentials</span>
+              <span>{{ brokerName === 'binance' ? 'Binance API keys' : 'Deriv credentials' }}</span>
               <span class="kv">{{ setupStatus.broker_configured ? 'Configured' : 'Missing' }}</span>
             </div>
             <div class="item-row">
@@ -661,8 +811,11 @@ onMounted(fetchBootstrap)
     </div>
 
     <template v-else>
-      <section class="two-col section-stack">
-        <article class="card section-card">
+      <div class="tab-grid">
+      <CandleChart v-show="tab === 'dashboard'" :api="api" :symbols="symbols" :history="tradeHistory" :refresh-key="refreshKey" />
+      <JournalTable v-show="tab === 'journal'" :api="api" :refresh-key="refreshKey" @export="exportJournal" />
+      <section class="tab-section">
+        <article v-show="tab === 'settings'" class="card section-card">
           <div class="section-head">
             <h2>Settings</h2>
             <p>Store your own runtime configuration locally, including Deriv credentials, symbol definitions, and live-trade defaults.</p>
@@ -671,8 +824,58 @@ onMounted(fetchBootstrap)
             <div class="form-grid">
               <div class="field">
                 <label>Broker Provider</label>
-                <input v-model="settingsForm.broker_provider" class="input" type="text" readonly />
+                <select v-model="settingsForm.broker_provider" class="select">
+                  <option value="deriv">Deriv (rise/fall contracts)</option>
+                  <option value="binance">Binance Spot (buy-only)</option>
+                </select>
               </div>
+              <div class="field">
+                <label>Market Data Source</label>
+                <select v-model="settingsForm.market_source" class="select">
+                  <option value="deriv">Deriv candles</option>
+                  <option value="binance">Binance public klines (no key)</option>
+                  <option value="replay">Replay file (offline demo)</option>
+                </select>
+              </div>
+              <div v-if="settingsForm.market_source === 'binance'" class="field">
+                <label>Binance Data URL</label>
+                <select v-model="settingsForm.binance_data_url" class="select">
+                  <option value="https://data-api.binance.vision">data-api.binance.vision (global)</option>
+                  <option value="https://api.binance.us">api.binance.us (US)</option>
+                </select>
+              </div>
+              <template v-if="settingsForm.broker_provider === 'binance'">
+                <div class="field">
+                  <label>Binance Network</label>
+                  <label class="check">
+                    <input v-model="settingsForm.binance_testnet" type="checkbox" />
+                    Testnet (recommended). Untick only for real funds.
+                  </label>
+                </div>
+                <div class="field">
+                  <label>Binance API Key</label>
+                  <input
+                    v-model="settingsForm.binance_api_key"
+                    class="input"
+                    type="password"
+                    autocomplete="off"
+                    :placeholder="binanceKeysSaved ? 'Saved — leave blank to keep it' : 'Spot trading only, no withdrawals'"
+                  />
+                </div>
+                <div class="field">
+                  <label>Binance API Secret</label>
+                  <input
+                    v-model="settingsForm.binance_api_secret"
+                    class="input"
+                    type="password"
+                    autocomplete="off"
+                    :placeholder="binanceKeysSaved ? 'Saved — leave blank to keep it' : 'Never shared back by the API'"
+                  />
+                  <button v-if="binanceKeysSaved" class="button secondary" type="button" :disabled="busy" @click="forgetBinanceKeys">
+                    Forget saved keys
+                  </button>
+                </div>
+              </template>
               <div class="field">
                 <label>Deriv App ID</label>
                 <input v-model="settingsForm.deriv_app_id" class="input" type="text" placeholder="Enter your Deriv app ID" />
@@ -850,6 +1053,8 @@ onMounted(fetchBootstrap)
               />
             </div>
 
+            <SymbolPicker v-model="symbolsJson" :source="settingsForm.market_source" />
+
             <div class="field">
               <label>Configured Symbols JSON</label>
               <textarea
@@ -883,7 +1088,7 @@ onMounted(fetchBootstrap)
           </div>
         </article>
 
-        <article class="card section-card">
+        <article v-show="tab === 'settings'" class="card section-card">
           <div class="section-head">
             <h2>Broker Connection</h2>
             <p>Verify your saved Deriv settings before attempting a live order.</p>
@@ -936,8 +1141,8 @@ onMounted(fetchBootstrap)
         </article>
       </section>
 
-      <section class="two-col section-stack">
-        <article class="card section-card">
+      <section class="tab-section">
+        <article v-show="tab === 'trade'" class="card section-card">
           <div class="section-head">
             <h2>Paper Trade Entry</h2>
             <p>Open paper positions against the symbols and prices you configured.</p>
@@ -977,10 +1182,14 @@ onMounted(fetchBootstrap)
           </div>
         </article>
 
-        <article class="card section-card">
+        <article v-show="tab === 'trade'" class="card section-card">
           <div class="section-head">
             <h2>Live Trade Entry</h2>
-            <p>Send an optional Deriv order using the saved broker settings and live defaults.</p>
+            <p v-if="brokerName === 'binance'">
+              Market BUY on {{ networkLabel }} sized by the stake in quote currency (e.g. USDT). Spot is buy-only; open
+              positions are sold by the auto-trader after the hold time or with "Sell now" on the dashboard.
+            </p>
+            <p v-else>Send an optional Deriv order using the saved broker settings and live defaults.</p>
           </div>
           <div class="section-body">
             <div class="form-grid">
@@ -1052,8 +1261,8 @@ onMounted(fetchBootstrap)
         </article>
       </section>
 
-      <section class="two-col section-stack">
-        <article class="card section-card">
+      <section class="tab-section">
+        <article v-show="tab === 'dashboard'" class="card section-card">
           <div class="section-head">
             <h2>Signal Feed</h2>
             <p>Each saved market snapshot is evaluated with the simplified public rule stack.</p>
@@ -1118,7 +1327,7 @@ onMounted(fetchBootstrap)
           </div>
         </article>
 
-        <article class="card section-card">
+        <article v-show="tab === 'trade'" class="card section-card">
           <div class="section-head">
             <h2>Rebalancing</h2>
             <p>Track drift versus target allocations and apply one-step corrective actions.</p>
@@ -1187,8 +1396,8 @@ onMounted(fetchBootstrap)
         </article>
       </section>
 
-      <section class="two-col section-stack">
-        <article class="card section-card">
+      <section class="tab-section">
+        <article v-show="tab === 'dashboard'" class="card section-card">
           <div class="section-head">
             <h2>Portfolio</h2>
             <p>Current demo positions with refreshed market prices.</p>
@@ -1221,17 +1430,19 @@ onMounted(fetchBootstrap)
           </div>
         </article>
 
-        <article class="card section-card">
+        <article v-show="tab === 'backtest'" class="card section-card">
           <div class="section-head">
             <h2>Backtests</h2>
             <p>
               Walk-forward replay of the live rules over real candles: enter at the next open, exit after a fixed
-              number of bars. Price moves only; payouts and spreads are not modelled.
+              number of bars. Raw price moves, plus optional payout scoring and exchange fees (Binance defaults to 0.1% per side).
+              Spreads and slippage are not modelled.
             </p>
             <div class="item-row">
               <label>Exit after (bars) <input v-model.number="backtestOptions.horizon_bars" type="number" min="1" max="100" /></label>
               <label>Candles <input v-model.number="backtestOptions.candle_count" type="number" min="150" max="5000" /></label>
               <label>Payout % (0 = off) <input v-model.number="backtestOptions.payout_pct" type="number" min="0" max="500" /></label>
+              <label>Fee % per side <input v-model.number="backtestOptions.fee_pct" type="number" min="0" max="5" step="0.01" placeholder="auto" /></label>
             </div>
           </div>
           <div class="section-body">
@@ -1259,6 +1470,10 @@ onMounted(fetchBootstrap)
               </div>
 
               <div v-for="row in candleBacktest?.results || []" :key="`bt-${row.symbol}`" class="item-card">
+                <div v-if="row.fee_pct" class="kv">
+                  Net of {{ row.fee_pct }}%/side fees: {{ row.total_net_return_pct }}% total · win
+                  {{ formatRate(row.net_win_rate) }} · max DD {{ row.max_net_drawdown_pct }}%
+                </div>
                 <div class="item-row">
                   <div class="item-title">{{ row.symbol }}</div>
                   <div class="kv">{{ row.trades }} trades · win {{ formatRate(row.win_rate) }}</div>
@@ -1303,8 +1518,8 @@ onMounted(fetchBootstrap)
         </article>
       </section>
 
-      <section class="two-col section-stack">
-        <article class="card section-card">
+      <section class="tab-section">
+        <article v-show="tab === 'backtest'" class="card section-card">
           <div class="section-head">
             <h2>Rule Registry</h2>
             <p>Public documentation for the simplified rule stack shipped in the community repo.</p>
@@ -1320,7 +1535,7 @@ onMounted(fetchBootstrap)
           </div>
         </article>
 
-        <article class="card section-card">
+        <article v-show="tab === 'dashboard'" class="card section-card">
           <div class="section-head">
             <h2>Recent Activity</h2>
             <p>The latest paper-trade and rebalance events. The full history is kept in the CSV journal.</p>
@@ -1345,6 +1560,17 @@ onMounted(fetchBootstrap)
           </div>
         </article>
       </section>
+      </div>
     </template>
+
+    <ToastStack :toasts="toasts" @dismiss="dismissToast" />
+    <ConfirmDialog
+      :open="confirmState.open"
+      :title="confirmState.title"
+      :body="confirmState.body"
+      :confirm-label="confirmState.confirmLabel"
+      @confirm="settleConfirm(true)"
+      @cancel="settleConfirm(false)"
+    />
   </main>
 </template>
