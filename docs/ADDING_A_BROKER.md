@@ -41,6 +41,17 @@ it as `last_error`, sends an `AUTO_ERROR` alert and keeps going. Don't let other
 
 A new adapter is created for every loop tick and `close()` is always called afterwards.
 
+## Contracts vs positions
+
+Brokers settle trades in one of two ways:
+
+- **Self-settling contracts** (Deriv rise/fall): keep `settles_itself = True`. The auto-trader polls `trade_status(ref)` until it reports a profit.
+- **Positions** (Binance Spot): set `settles_itself = False` and implement `close_trade(position)`. `open_trade` returns the position details (quantity, cost), and after `auto_hold_minutes` the auto-trader calls `close_trade`, which must return `{"profit": float}` from real fills minus fees.
+
+Set `sides` to the directions your broker can open, e.g. `frozenset({"BUY"})` for spot. The auto-trader skips other signals and says so in its status instead of sending an order that would fail.
+
+See `BinanceSpotBroker` in `backend/app/brokers.py` and `tests/test_binance.py` for a full example with HMAC signing, exchange filters and mocked HTTP.
+
 ## 2. Register it
 
 ```python

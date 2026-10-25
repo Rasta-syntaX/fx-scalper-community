@@ -9,8 +9,9 @@ something big so work isn't duplicated.
 - **More replay fixtures:** record candle files for other symbols/timeframes into `backend/data/`.
 - **CLI `--csv`:** let `python -m app.cli backtest` write trades to a CSV file.
 - **Slack or email alerts:** add a channel next to Discord/Telegram in `backend/app/notifications.py`.
-- **Dark/light theme toggle** for the dashboard.
+- **Frontend tests:** add Vitest + Vue Test Utils for `frontend/src/components/`.
 - **Journal filters:** export only one symbol or date range from `GET /api/journal.csv`.
+- **More Binance presets / symbol search** in the symbol picker using `exchangeInfo`.
 - **Tests:** more rule-engine edge cases in `tests/`.
 
 ## Bigger projects
@@ -21,6 +22,7 @@ something big so work isn't duplicated.
 - **Pluggable strategies:** let contributors drop in a strategy module next to the default rule engine.
 - **Trailing stop / take-profit** for paper auto-trades instead of a fixed hold time.
 - **Session-aware stats:** win rate split by London/NY/Asia session.
+- **Binance Futures adapter** (shorts) behind the same `LiveBroker` contract, testnet first.
 
 ## Done
 
@@ -31,3 +33,5 @@ something big so work isn't duplicated.
 - Discord/Telegram alerts and CSV trade journal
 - Broker adapter interface (Deriv first)
 - Token never returned by the API, optional API key, local-only CORS
+- Binance market data + Spot broker (testnet first, buys only), fee-aware backtests
+- Tabbed, mobile-friendly dashboard with polling, chart, journal table, symbol picker, demo data and themes
